@@ -212,6 +212,7 @@
     <div class="stat"><span class="k">ok</span><span class="v ok" id="s-ok">0</span></div>
     <div class="stat"><span class="k">bad</span><span class="v bad" id="s-bad">0</span></div>
     <div class="stat"><span class="k">ids</span><span class="v" id="s-ids">0</span></div>
+    <div class="stat"><span class="k">bitrate</span><span class="v" id="s-baud" title="estimated from the per-level UI fit + device time-base">—</span></div>
     <div class="stat"><span class="k">loss</span><span class="v warn" id="s-loss">0</span></div>
     <div class="stat"><span class="k">shed</span><span class="v dim" id="s-shed">0</span></div>
     <div class="stat"><span class="k">usb</span><span class="v dim" id="s-usb">0<small style="font-size:9px;color:var(--dim2)"> KB/s</small></span></div>
@@ -788,6 +789,7 @@ class StreamProc {
     this.cont = 0;
     this.cal = null;            // no premature default: real UI~4.5 != soft-blob 7/8
     this.bound = 0;             // cached boundary threshold
+    this.miss = 0;              // consecutive decode failures -> stale-cache (bitrate change) detector
     this.fe = false;            // saw a 0xFE, awaiting '[' to confirm a diag block
     this.diag = null;           // collecting diag ascii (between 0xFE '[' and 0xFE)
   }
@@ -820,6 +822,11 @@ class StreamProc {
   flush(force = false) {
     if (!this.runbuf.length) return;
     if (this.runbuf.length < FLUSH_AT && !force) return;
+    // Decode lock collapsed (typically a LIVE bitrate change): the cached cal + boundary are
+    // now for the old rate, so every frame misses and nothing displays. Drop them so this flush
+    // re-derives the boundary (below) and the next emit re-fits cal at the NEW rate. onLoss()
+    // clears the host sync gate so good frames re-appear once the new lock is found.
+    if (this.miss > 64) { this.cal = null; this.bound = 0; this.miss = 0; this.onLoss(); }
     // load-shed: never let the backlog snowball (the cold-start feedback loop)
     if (this.runbuf.length > MAX_BACKLOG) {
       const drop = this.runbuf.length - MAX_BACKLOG;
@@ -846,7 +853,7 @@ class StreamProc {
         if (drop >= runs.length) break;
         const sub = runs.slice(drop);
         let f; try { f = parseFrame(unstuff(decodeBurstCal(sub, c))); } catch (e) { f = null; }
-        if (f && !f.extended && f.crcOk) { this.onFrame(f, (c[0] + c[2]) / 2, drop); return; }
+        if (f && !f.extended && f.crcOk) { this.miss = 0; this.onFrame(f, (c[0] + c[2]) / 2, drop); return; }
       }
       // tier 2 — narrow re-fit around the current UI (cheap, ~11 candidates) and
       //          REFRESH the cached cal: a frozen cal only locks ~46% at UI~4.5.
@@ -858,7 +865,7 @@ class StreamProc {
           if (drop >= runs.length) break;
           const sub = runs.slice(drop);
           let f; try { f = parseFrame(unstuff(decodeBurstCal(sub, nc))); } catch (e) { f = null; }
-          if (f && !f.extended && f.crcOk) { this.cal = nc; this.onFrame(f, ui, drop); return; }
+          if (f && !f.extended && f.crcOk) { this.miss = 0; this.cal = nc; this.onFrame(f, ui, drop); return; }
         }
       }
     }
@@ -866,8 +873,9 @@ class StreamProc {
     if (budget.n <= 0) { state.shed++; return; }
     budget.n--;
     let best; try { best = decodeFrameRuns(runs); } catch (e) { best = null; }
-    if (!best) return;
-    if (best.frame.crcOk) this.cal = fitBurstUI(runs.slice(best.drop));   // refresh cal
+    if (!best) { this.miss++; return; }
+    if (best.frame.crcOk) { this.cal = fitBurstUI(runs.slice(best.drop)); this.miss = 0; }   // refresh cal
+    else this.miss++;
     this.onFrame(best.frame, best.ui, best.drop);
   }
 }
@@ -936,6 +944,7 @@ const state = {
   ids: new Map(),               // id -> {id,count,firstT,lastT,dt[],dlc,data[],changed[]}
   win: [],                      // OK-frame timestamps (1 s) -> fps
   sparkHist: [],                // fps samples (one per 250 ms tick), last ~120
+  baudHist: [],                 // recent baud estimates (one per 250 ms tick) -> smoothed bitrate
   usbWin: 0,                    // bytes this 1 s window
   usbBytes: 0,
   trace: [],                    // bounded ring of recent OK frames for Trace view
@@ -1096,6 +1105,29 @@ function drawSparkOn(cv, data) {
 
 function setText(id, v) { const el = $(id); if (el.firstChild && el.firstChild.nodeType === 3) el.firstChild.nodeValue = v; else el.textContent = v; }
 
+// ---- CAN absolute bitrate from the per-level UI fit (mirrors scripts/can_rle_decode.py) ----
+// The device ships its time-base in [MODE rle … thi tlo fcpu]; until a heartbeat lands we
+// use the measured blob constants (HIGH=9, LOW=8 cyc/tick @ 48 MHz). DOMINANT runs are the
+// LOW level (tlo cyc/tick), RECESSIVE are HIGH (thi). T_bit = UI*cyc/fcpu, so the two levels
+// must agree: baud = fcpu/(UI_level*cyc). proc.cal = [uiDom, cDom, uiRec, cRec] is the live fit.
+const canTB = { thi: 9, tlo: 8, fcpu: 48000000 };
+const CAN_STD_K = [10, 20, 33.333, 50, 83.333, 100, 125, 250, 500, 800, 1000];   // kbit/s
+function baudFromUI(uiDom, uiRec) {
+  const bd = uiDom > 0 ? canTB.fcpu / (uiDom * canTB.tlo) : 0;
+  const br = uiRec > 0 ? canTB.fcpu / (uiRec * canTB.thi) : 0;
+  const mean = (bd && br) ? (bd + br) / 2 : (bd || br);
+  return { mean, bd, br };
+}
+function fmtBaud(hist) {
+  if (hist.length < 4) return { label: '—', title: 'estimating…' };
+  const k = median(hist) / 1000;                                  // kbit/s
+  let best = CAN_STD_K[0], err = Infinity;
+  for (const s of CAN_STD_K) { const e = Math.abs(k - s) / s; if (e < err) { err = e; best = s; } }
+  const fmtK = v => v >= 1000 ? '1 Mbit/s' : `${v < 100 ? v.toFixed(1).replace(/\.0$/, '') : v.toFixed(0)} kbit/s`;
+  if (err <= 0.08) return { label: fmtK(best), title: `≈ ${k.toFixed(1)} kbit/s → ${fmtK(best)} (Δ ${(err * 100).toFixed(1)}%)` };
+  return { label: `~${k.toFixed(0)}k`, title: `≈ ${k.toFixed(1)} kbit/s — no standard rate within 8%` };
+}
+
 function tick() {
   const now = performance.now();
   const usbKB = state.usbWin / 1024 * 4;                     // /250ms -> /s
@@ -1108,6 +1140,17 @@ function tick() {
     setText('s-ok', state.ok); setText('s-bad', state.bad);
     setText('s-ids', state.ids.size); setText('s-loss', state.loss);
     setText('s-shed', state.shed); setText('s-usb', usbKB.toFixed(0));
+    // bitrate: sample the live per-level UI fit each tick, smooth over ~5 s (the fit
+    // jitters per-frame and a tier-2 refit can momentarily collapse the two levels).
+    if (state.synced && proc.cal) {
+      const b = baudFromUI(proc.cal[0], proc.cal[2]);
+      if (b.mean > 5000 && b.mean < 2e6) {                    // plausible CAN range 5 k..2 Mbit
+        state.baudHist.push(b.mean);
+        if (state.baudHist.length > 20) state.baudHist.shift();
+      }
+    } else if (state.baudHist.length) state.baudHist = [];     // lost sync -> drop the estimate
+    const bd = fmtBaud(state.baudHist);
+    setText('s-baud', bd.label); $('s-baud').title = bd.title;
     elEmpty.style.display = state.frames ? 'none' : 'flex';
     if (state.view === 'grid') { if (state.dirty || state.ids.size) rebuildGrid(now); state.dirty = false; }
     else rebuildTrace();
@@ -1164,6 +1207,7 @@ function resetCan() {
   proc.reset();
   state.frames = state.ok = state.bad = state.loss = state.shed = 0;
   state.ids.clear(); state.win = []; state.trace = []; state.synced = false;
+  state.baudHist = [];
   state.usbBytes = 0; state.usbWin = 0; state.dirty = true;
   elGrid.replaceChildren(); elTrace.replaceChildren();
 }
@@ -1186,6 +1230,7 @@ async function readLoop(port) {
   const reader = port.readable.getReader();
   state.reader = reader;
   const warmUntil = performance.now() + WARMUP_MS;
+  let lastYield = performance.now();
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -1195,7 +1240,16 @@ async function readLoop(port) {
       const bytes = value;                                    // Uint8Array
       state.usbBytes += bytes.length; state.usbWin += bytes.length;
       if (state.recording) state.recBuf.push(bytes.slice());
-      feedActive(bytes);
+      feedActive(bytes);                                      // decode runs SYNCHRONOUSLY here
+      // At 1 Mbit/s the device saturates the link, so reader.read() keeps resolving from the
+      // browser's serial buffer as a MICROTASK - which would starve the macrotask queue (the
+      // 250 ms render tick + the compositor) and freeze the tab to the point the OS kills it.
+      // Yield to a macrotask whenever we've held the thread > 12 ms so the UI keeps breathing;
+      // surplus bytes are absorbed by bufferSize + the runbuf load-shed, so sync is never lost.
+      if (performance.now() - lastYield > 12) {
+        await new Promise(r => setTimeout(r));
+        lastYield = performance.now();
+      }
     }
   } catch (e) { /* disconnect / cancel */ }
   finally {
@@ -1634,7 +1688,13 @@ function sniffMeta(bytes) {
 }
 function handleMeta(txt) {
   const meta = MDIO.parseMeta(txt);
-  if (meta.tag === 'MODE' && meta.mode) onModeMarker(meta.mode);
+  if (meta.tag === 'MODE' && meta.mode) {
+    // rle time-base: [MODE rle wire=2 thi=9 tlo=8 fcpu=48000000] -> absolute CAN bitrate.
+    // parseMeta keeps thi/tlo/fcpu as strings; pin them as ints (ignore a partial block).
+    const thi = parseInt(meta.thi, 10), tlo = parseInt(meta.tlo, 10), fcpu = parseInt(meta.fcpu, 10);
+    if (thi > 0 && tlo > 0 && fcpu > 0) { canTB.thi = thi; canTB.tlo = tlo; canTB.fcpu = fcpu; }
+    onModeMarker(meta.mode);
+  }
 }
 
 const elDmxGrid = $('dmx-grid');
