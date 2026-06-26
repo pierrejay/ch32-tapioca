@@ -759,11 +759,14 @@ function decodeFrameRuns(counts) {       // try as-is and with leading idle-tail
   return best;
 }
 
-function frameBoundaryRuns(runs) {       // MIN-based (NOT percentile): max(56, 6*min)
+function frameBoundaryRuns(runs) {       // max(56, 8*min): above legal 5-bit runs
   let mn = Infinity;
   for (const r of runs) if (r > 0 && r < mn) mn = r;
   if (mn === Infinity) mn = BOUNDARY;
-  return Math.max(BOUNDARY, 6 * mn);
+  // Real 500 kbit/s captures have legal 5-bit recessive runs around 58/59 ticks
+  // while 1-bit runs bottom out near 9/10 ticks. 6*min was too close and split
+  // inside FF-heavy payloads; 8*min stays below real EOF/IFS gaps.
+  return Math.max(BOUNDARY, 8 * mn);
 }
 
 // ============================================================================

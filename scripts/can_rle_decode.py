@@ -193,7 +193,11 @@ def frame_boundary_runs(runs):
        legitimately exceed 128 ticks at low bitrate; only the idle gap is the cut."""
     small = [r for r in runs if r > 0] or [BOUNDARY]
     c1 = min(small)
-    return max(BOUNDARY, 6 * c1)
+    # 5 identical CAN bits are legal in-frame before a stuff bit. At 500 kbit/s
+    # they measured ~58/59 ticks in real captures while c1 (1-bit min) is ~9/10;
+    # 6*c1 is therefore too close and can split inside FF-heavy payloads. Keep
+    # the fixed 56-tick floor for 1 Mbit/s, but scale low rates above 5-bit runs.
+    return max(BOUNDARY, 8 * c1)
 
 
 def fit_burst_ui(counts):
@@ -726,7 +730,7 @@ def reader(path, st):
             del runbuf[:n]
             st.add_dropped(n)
         # Boundary threshold is bus-rate-fixed -> derive ONCE then reuse (no per-flush
-        # sort). frame_boundary_runs = max(56, 6*min-run), the proven offline value.
+        # sort). frame_boundary_runs = max(56, 8*min-run), the proven offline value.
         if not bnd[0]:
             bnd[0] = D.frame_boundary_runs(runbuf)
         bound = bnd[0]
