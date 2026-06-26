@@ -1,0 +1,1764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tapioca — CAN Sniffer</title>
+<style>
+  :root {
+    color-scheme: dark;     /* native scrollbars / form controls follow the dark theme */
+    --bg:        #0b0e14;   /* near-black slate */
+    --bg2:       #0f131c;
+    --panel:     #131822;
+    --panel2:    #171d29;
+    --line:      #232b3a;   /* hairline borders */
+    --line2:     #2c3547;
+    --text:      #d7dde8;
+    --dim:       #7b869c;
+    --dim2:      #565f73;
+    --accent:    #5aa6ff;   /* CAN ID blue */
+    --ok:        #46d6a0;
+    --bad:       #ff5c72;
+    --warn:      #f2b950;   /* byte-change / stale amber */
+    --mono: 'SF Mono','JetBrains Mono','Cascadia Code','Consolas',ui-monospace,monospace;
+    --sans: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; }
+  body {
+    background: radial-gradient(120% 80% at 50% -10%, #11161f 0%, var(--bg) 60%);
+    color: var(--text); font-family: var(--sans); font-size: 13px;
+    display: flex; flex-direction: column; overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:var(--line2); border-radius:6px; border:2px solid transparent; background-clip:padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background:var(--dim2); border-radius:6px; border:2px solid transparent; background-clip:padding-box; }
+  ::-webkit-scrollbar-corner { background:transparent; }
+
+  /* ---- top bar ---- */
+  #bar {
+    display:flex; align-items:center; gap:10px; padding:9px 14px;
+    background: linear-gradient(180deg, var(--panel2), var(--panel));
+    border-bottom:1px solid var(--line);
+  }
+  #brand { display:flex; align-items:center; gap:9px; font-weight:600; letter-spacing:.2px; }
+  #brand .dot { width:9px; height:9px; flex:0 0 auto; border-radius:50%; background:var(--dim2);
+                box-shadow:0 0 0 0 rgba(70,214,160,.0); transition:.3s; }
+  #brand.live .dot { background:var(--ok); box-shadow:0 0 10px 1px rgba(70,214,160,.55); animation:pulse 1.6s infinite; }
+  #brand .sub { color:var(--dim); font-weight:400; font-size:11px; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+
+  .spacer { flex:1; }
+  button {
+    background: var(--panel2); color: var(--text); border:1px solid var(--line2);
+    padding:6px 13px; border-radius:6px; cursor:pointer; font-family:var(--sans);
+    font-size:12px; font-weight:500; transition:.12s; white-space:nowrap;
+  }
+  button:hover:not(:disabled) { background:#1e2636; border-color:#3a455c; }
+  button:disabled { opacity:.35; cursor:default; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#06101f; }
+  button.primary:hover { background:#79b6ff; }
+  button.active { background:var(--ok); border-color:var(--ok); color:#04130d; }
+  button.rec.active { background:var(--bad); border-color:var(--bad); color:#1a0509; }
+  .seg { display:flex; border:1px solid var(--line2); border-radius:6px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; }
+  .seg button.active { background:var(--accent); color:#06101f; }
+  #status { color:var(--dim); font-size:11px; min-width:120px; text-align:right; }
+
+  /* ---- health strip ---- */
+  #health { display:flex; align-items:stretch; gap:0; background:var(--bg2);
+            border-bottom:1px solid var(--line); }
+  .stat { padding:7px 16px; border-right:1px solid var(--line); display:flex;
+          flex-direction:column; gap:1px; min-width:78px; }
+  .stat .k { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.6px; }
+  .stat .v { font-family:var(--mono); font-size:15px; font-weight:600; line-height:1.1; }
+  .stat .v.ok  { color:var(--ok); }
+  .stat .v.bad { color:var(--bad); }
+  .stat .v.warn{ color:var(--warn); }
+  .stat .v.dim { color:var(--dim); }
+  .spark-wrap { flex:1; display:flex; flex-direction:column; justify-content:center;
+                padding:5px 14px; min-width:140px; }
+  .spark-wrap .k { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.6px; }
+  canvas.spark { width:100%; height:26px; display:block; }
+
+  /* ---- main ---- */
+  #main { flex:1; overflow:hidden; display:flex; flex-direction:column; position:relative; }
+
+  /* grouped-ID table */
+  #grid-wrap { flex:1; overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-family:var(--mono); }
+  thead th {
+    position:sticky; top:0; z-index:2; background:var(--panel);
+    color:var(--dim); font-weight:500; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.5px; text-align:left; padding:7px 10px; border-bottom:1px solid var(--line2);
+    cursor:pointer; user-select:none; white-space:nowrap;
+  }
+  thead th:hover { color:var(--text); }
+  thead th .arrow { color:var(--accent); font-size:9px; }
+  tbody td { padding:5px 10px; border-bottom:1px solid rgba(35,43,58,.55); white-space:nowrap; }
+  tbody tr:hover { background:rgba(90,166,255,.05); }
+  tbody tr.fresh { animation:flashIn .5s; }
+  @keyframes flashIn { from { background:rgba(90,166,255,.22); } to { background:transparent; } }
+  tbody tr.stale td { color:var(--dim2); }
+  .col-id   { color:var(--accent); font-weight:600; }
+  .col-cnt, .col-rate, .col-per, .col-dlc { color:var(--dim); text-align:right; font-variant-numeric:tabular-nums; }
+  .col-rate { color:var(--text); }
+  .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:7px;
+              vertical-align:middle; background:#2f6e58; }   /* dim = known but quiet this window */
+  .live-dot.act { background:var(--ok); animation:actblink .42s ease-out; }
+  @keyframes actblink {
+    0%   { background:#c6f7e2; box-shadow:0 0 7px 2px rgba(70,214,160,.85); }
+    100% { background:var(--ok); box-shadow:0 0 4px 0 rgba(70,214,160,0); }
+  }
+  tr.stale .live-dot { background:var(--dim2); box-shadow:none; animation:none; }   /* asleep = neutral grey, not error-red */
+  .bytes { letter-spacing:.5px; }
+  .byte { display:inline-block; min-width:18px; text-align:center; color:var(--text);
+          padding:0 1px; border-radius:3px; transition:background .25s, color .25s; }
+  .data-empty { color:var(--dim2); }
+
+  /* trace view */
+  #trace-wrap { flex:1; overflow:auto; display:none; font-family:var(--mono); font-size:12px; }
+  #trace-wrap .trow { display:grid; grid-template-columns:84px 64px 34px 1fr; gap:10px;
+                      padding:3px 14px; border-bottom:1px solid rgba(35,43,58,.4); }
+  #trace-wrap .trow .t  { color:var(--dim); }
+  #trace-wrap .trow .id { color:var(--accent); }
+  #trace-wrap .trow .d  { color:var(--text); letter-spacing:.5px; }
+
+  .hrow { display:flex; flex:1; align-items:stretch; }
+
+  /* "traffic but no recognised frames" banner — smooth collapse, never flickers (state has hysteresis) */
+  #nosig { max-height:0; opacity:0; overflow:hidden; transition:max-height .25s ease, opacity .25s ease;
+           background:rgba(242,185,80,.10); color:var(--warn); text-align:center; font-size:12px; font-weight:500; }
+  #nosig.on { max-height:34px; opacity:1; padding:6px 14px; border-bottom:1px solid rgba(242,185,80,.3); }
+
+  /* DMX channel grid (monitor heatmap / fader feel) */
+  #dmx-wrap { flex:1; overflow:auto; display:none; padding:9px 10px; }
+
+  /* ---- mode badge (active mode + reconciliation state) ---- */
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:20px;
+          font-size:11px; font-weight:600; border:1px solid var(--line2); color:var(--dim); white-space:nowrap; }
+  .pill .pdot { width:7px; height:7px; border-radius:50%; background:var(--dim); }
+  .pill.synced  { color:var(--ok);   border-color:rgba(70,214,160,.4); }  .pill.synced .pdot  { background:var(--ok); }
+  .pill.pending { color:var(--warn); border-color:rgba(242,185,80,.4); }  .pill.pending .pdot { background:var(--warn); animation:modeblink .8s infinite; }
+  .pill.revert  { color:var(--bad);  border-color:rgba(255,92,114,.4); }  .pill.revert .pdot  { background:var(--bad); }
+  @keyframes modeblink { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+  /* ---- MDIO view (group-by PHY,register) ---- */
+  #mdio-wrap { flex:1; overflow:auto; display:none; }
+  #mdio-wrap table { width:100%; border-collapse:collapse; font-family:var(--mono); }
+  #mdio-wrap thead th { position:sticky; top:0; z-index:2; background:var(--panel); color:var(--dim);
+        font-weight:500; text-align:left; padding:7px 12px; font-size:10px; text-transform:uppercase; letter-spacing:.6px; }
+  #mdio-wrap tbody td { padding:5px 12px; border-bottom:1px solid rgba(35,43,58,.55); white-space:nowrap; font-size:12px; }
+  #mdio-wrap tbody tr.fresh { animation:flashIn .5s; }
+  #mdio-wrap tbody tr.stale td { color:var(--dim2); }
+  #mdio-wrap .c-phy { color:var(--accent); font-weight:600; }
+  #mdio-wrap .c-tgt.mmd { color:var(--warn); }
+  #mdio-wrap .c-op { font-size:11px; } #mdio-wrap .c-op.r { color:var(--ok); } #mdio-wrap .c-op.w { color:var(--warn); }
+  #mdio-wrap .c-data { font-weight:600; padding:0 4px; border-radius:3px; transition:background .25s; }
+  #mdio-wrap .c-cnt,#mdio-wrap .c-rate { color:var(--dim); text-align:right; font-variant-numeric:tabular-nums; }
+  #mdio-wrap .led { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; vertical-align:middle; background:#2f6e58; }
+  #mdio-wrap .led.act { background:var(--ok); animation:actblink .42s ease-out; }
+  #mdio-wrap tr.stale .led { background:var(--dim2); }   /* asleep = neutral grey, not error-red */
+  #dmx-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(54px,1fr)); gap:3px; }
+  .ch { position:relative; height:26px; border:1px solid var(--line); border-radius:4px;
+        overflow:hidden; background:var(--panel); font-family:var(--mono); }
+  .ch .fill { position:absolute; left:0; top:0; bottom:0; width:0; transition:width .12s linear, background .12s linear; }
+  .ch .num { position:absolute; top:1px; left:4px; font-size:8px; color:var(--dim2); z-index:1; line-height:1; }
+  .ch .val { position:absolute; bottom:1px; right:5px; font-size:12px; font-weight:600; color:var(--dim2); z-index:1; line-height:1; }
+  .ch.on .num { color:var(--dim); }
+  .ch.on .val { color:var(--text); }
+  .ch.chg { box-shadow:inset 0 0 0 1.5px var(--warn); }
+
+  #empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+           flex-direction:column; gap:10px; color:var(--dim2); pointer-events:none; }
+  #empty .big { font-size:15px; color:var(--dim); }
+
+  /* compatibility banner */
+  #nosupport { display:none; background:var(--bad); color:#1a0509; padding:8px 14px;
+               font-size:12px; text-align:center; }
+</style>
+</head>
+<body>
+
+<div id="nosupport">⚠ This browser has no Web Serial API. Use Chrome, Edge or Opera (desktop) over <code>https://</code> or <code>file://</code>.</div>
+
+<div id="bar">
+  <div id="brand"><span class="dot"></span><span>Tapioca</span><span class="sub" id="brand-sub">CAN sniffer · CH32X035</span></div>
+  <div class="seg" id="proto-seg">
+    <button data-proto="can" class="active">CAN</button>
+    <button data-proto="dmx">DMX</button>
+    <button data-proto="mdio">MDIO</button>
+  </div>
+  <span id="mode-pill" class="pill synced" title="active device capture mode — ∿ timed (run-length, non-clocked) · ⎍ clocked (sampled). Driven by the protocol selector; colour = reconciliation state (synced / switching / mismatch)."><span class="pdot"></span><span id="mode-pill-txt">∿ timed</span></span>
+  <div class="spacer"></div>
+  <div class="seg" id="view-seg">
+    <button data-view="grid" class="active">Live IDs</button>
+    <button data-view="trace">Trace</button>
+  </div>
+  <button id="btn-connect" class="primary">Connect</button>
+  <button id="btn-demo">Demo</button>
+  <button id="btn-record" class="rec">● Rec</button>
+  <button id="btn-export" disabled>Export</button>
+  <button id="btn-clear">Clear</button>
+  <span id="status">Disconnected</span>
+</div>
+
+<div id="health">
+  <div id="health-can" class="hrow">
+    <div class="stat"><span class="k">frames</span><span class="v" id="s-frames">0</span></div>
+    <div class="stat"><span class="k">fps</span><span class="v" id="s-fps">0</span></div>
+    <div class="stat"><span class="k">ok</span><span class="v ok" id="s-ok">0</span></div>
+    <div class="stat"><span class="k">bad</span><span class="v bad" id="s-bad">0</span></div>
+    <div class="stat"><span class="k">ids</span><span class="v" id="s-ids">0</span></div>
+    <div class="stat"><span class="k">loss</span><span class="v warn" id="s-loss">0</span></div>
+    <div class="stat"><span class="k">shed</span><span class="v dim" id="s-shed">0</span></div>
+    <div class="stat"><span class="k">usb</span><span class="v dim" id="s-usb">0<small style="font-size:9px;color:var(--dim2)"> KB/s</small></span></div>
+    <div class="spark-wrap"><span class="k">fps · last 30 s</span><canvas id="spark" class="spark" width="600" height="26"></canvas></div>
+  </div>
+  <div id="health-dmx" class="hrow" style="display:none">
+    <div class="stat"><span class="k">packets</span><span class="v" id="d-packets">0</span></div>
+    <div class="stat"><span class="k">refresh</span><span class="v" id="d-refresh">0<small style="font-size:9px;color:var(--dim2)"> Hz</small></span></div>
+    <div class="stat"><span class="k">slots</span><span class="v" id="d-slots">0</span></div>
+    <div class="stat"><span class="k">start-code</span><span class="v dim" id="d-scode">—</span></div>
+    <div class="stat"><span class="k">rejected</span><span class="v warn" id="d-rejected">0</span></div>
+    <div class="stat"><span class="k">loss</span><span class="v warn" id="d-loss">0</span></div>
+    <div class="stat"><span class="k">usb</span><span class="v dim" id="d-usb">0<small style="font-size:9px;color:var(--dim2)"> KB/s</small></span></div>
+    <div class="spark-wrap"><span class="k">refresh · last 30 s</span><canvas id="spark2" class="spark" width="600" height="26"></canvas></div>
+  </div>
+  <div id="health-mdio" class="hrow" style="display:none">
+    <div class="stat"><span class="k">frames</span><span class="v" id="m-frames">0</span></div>
+    <div class="stat"><span class="k">fps</span><span class="v" id="m-fps">0</span></div>
+    <div class="stat"><span class="k">PHYs</span><span class="v" id="m-phys">0</span></div>
+    <div class="stat"><span class="k">registers</span><span class="v" id="m-regs">0</span></div>
+    <div class="stat"><span class="k">MMD acc</span><span class="v dim" id="m-mmd">0</span></div>
+    <div class="stat"><span class="k">MDC clock</span><span class="v ok" id="m-clk">—<small style="font-size:9px;color:var(--dim2)"> kHz</small></span></div>
+    <div class="stat"><span class="k">loss</span><span class="v warn" id="m-loss">0</span></div>
+    <div class="stat"><span class="k">usb</span><span class="v dim" id="m-usb">0<small style="font-size:9px;color:var(--dim2)"> KB/s</small></span></div>
+  </div>
+</div>
+
+<div id="main">
+  <div id="nosig"></div>
+  <div id="grid-wrap">
+    <table>
+      <thead><tr>
+        <th data-sort="id">ID</th>
+        <th data-sort="rate">rate</th>
+        <th data-sort="period">period</th>
+        <th data-sort="count">#</th>
+        <th data-sort="dlc">dlc</th>
+        <th style="cursor:default">data <span style="color:var(--dim2);text-transform:none;letter-spacing:0">· amber = byte just changed</span></th>
+      </tr></thead>
+      <tbody id="grid"></tbody>
+    </table>
+  </div>
+  <div id="trace-wrap"></div>
+  <div id="dmx-wrap"><div id="dmx-grid"></div></div>
+  <div id="mdio-wrap">
+    <table>
+      <thead><tr>
+        <th>PHY</th><th>target</th><th>op</th><th>data</th>
+        <th style="text-align:right">#</th><th style="text-align:right">rate</th>
+      </tr></thead>
+      <tbody id="mdio-grid"></tbody>
+    </table>
+  </div>
+  <div id="empty"><span class="big">No traffic yet</span><span>Connect to the sniffer, or hit Demo to see it move.</span></div>
+</div>
+
+<!-- MDIO (clocked/SAMPLED) codec — single source mdio_codec.js, shared with the Node tests -->
+<!-- Codec inlined so this dashboard is a portable single file. SOURCE OF TRUTH =
+     test/cobs.js + test/mdio_codec.js (also used by the Node test suite). After editing
+     them, run `node app/inline.mjs` to refresh the blocks below; app/test/run_all.sh
+     fails if they are out of sync. -->
+<!-- inline:test/cobs.js -->
+<script>
+// cobs.js — COBS framing, two keyings. 1:1 mirror of src/cobs.h.
+//
+//   cobsEncode / cobsDecode     : standard COBS, delimiter 0x00.
+//   cobsFfEncode / cobsFfDecode : COBS keyed on 0xFF (what the records use) — encoded payload
+//                                 never contains 0xFF, so 0xFF stays the single
+//                                 frame boundary in both capture modes.
+//
+// decode() returns null on a malformed stream (matching the C `return 0`).
+// Inputs/outputs are Uint8Array (or plain arrays of bytes).
+(function (root) {
+  'use strict';
+
+  function cobsEncode(input) {
+    const inp = input, len = inp.length;
+    const out = new Uint8Array(len + ((len / 254) | 0) + 1);
+    let read = 0, write = 1, codeIdx = 0, code = 1;
+    while (read < len) {
+      if (inp[read] === 0x00) {
+        out[codeIdx] = code; code = 1; codeIdx = write++; read++;
+      } else {
+        out[write++] = inp[read++]; code++;
+        if (code === 0xFF) { out[codeIdx] = code; code = 1; codeIdx = write++; }
+      }
+    }
+    out[codeIdx] = code;
+    return out.subarray(0, write);
+  }
+
+  function cobsDecode(input) {
+    const inp = input, len = inp.length;
+    const out = new Uint8Array(len);
+    let read = 0, write = 0;
+    while (read < len) {
+      const code = inp[read];
+      if (code === 0x00) return null;
+      read++;
+      if (read + (code - 1) > len) return null;
+      for (let i = 1; i < code; i++) out[write++] = inp[read++];
+      if (code !== 0xFF && read < len) out[write++] = 0x00;
+    }
+    return out.subarray(0, write);
+  }
+
+  function cobsFfEncode(input) {
+    const inp = input, len = inp.length;
+    const out = new Uint8Array(len + ((len / 253) | 0) + 1);
+    let read = 0, write = 1, codeIdx = 0, code = 1;
+    while (read < len) {
+      if (inp[read] === 0xFF) {
+        out[codeIdx] = code; code = 1; codeIdx = write++; read++;
+      } else {
+        out[write++] = inp[read++]; code++;
+        if (code === 0xFE) { out[codeIdx] = code; code = 1; codeIdx = write++; }
+      }
+    }
+    out[codeIdx] = code;
+    return out.subarray(0, write);
+  }
+
+  function cobsFfDecode(input) {
+    const inp = input, len = inp.length;
+    const out = new Uint8Array(len);
+    let read = 0, write = 0;
+    while (read < len) {
+      const code = inp[read];
+      if (code === 0xFF || code === 0x00) return null;  // 0xFF=boundary, 0x00=invalid code ([0x01,0xFE])
+      read++;
+      if (read + (code - 1) > len) return null;
+      for (let i = 1; i < code; i++) out[write++] = inp[read++];
+      if (code !== 0xFE && read < len) out[write++] = 0xFF;
+    }
+    return out.subarray(0, write);
+  }
+
+  const api = { cobsEncode, cobsDecode, cobsFfEncode, cobsFfDecode };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.COBS = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<!-- /inline:test/cobs.js -->
+<!-- inline:test/mdio_codec.js -->
+<script>
+/*
+ * mdio_codec.js — host-side MDIO codec, faithful port of scripts/mdio_lib.py.
+ *
+ * Binary firmware format: COBS-framed timestamped burst records. A record =
+ *   u8 type=1 | u32 t_us | u16 dur_us | u16 onset_us | u8 flags | u16 n | u8 payload[n]
+ * payload = captured bytes, bit-packed MSB-first. Decode at the BIT level: hunt a
+ * preamble (>=32 ones), then ST=01, then the Clause-22 fields; fold the REG13/14
+ * MMD-indirect mechanism into readable Clause-45 MMD accesses.
+ *
+ * WIRE VERSIONS (the format-version tag in [MODE … wire=N]):
+ *   wire=1 : COBS keyed on 0x00, records split on 0x00. The original framing,
+ *            bit-for-bit validated against mdio_lib.py.
+ *   wire=2 : COBS keyed on 0xFF inside the shared transport envelope —
+ *                      0xFF = the single record boundary, 0xFD = loss marker,
+ *                      0xFE[ascii]0xFE = metadata ([MODE], or [T] under -D DIAG). 0xFD/0xFE
+ *                      may occur INSIDE a COBS-0xFF payload, so they are only
+ *                      interpreted in segment-leading position (just after a 0xFF
+ *                      boundary): a lone 0xFD segment = loss; a 0xFE…0xFE ASCII
+ *                      segment = metadata; anything else = a COBS-0xFF record.
+ *                      (record field layout & bit-packing are identical to wire=1.)
+ *
+ * Loads in a browser (attaches to window.MDIO, uses window.COBS) and in Node
+ * (module.exports; requires ./cobs.js).
+ */
+(function (root) {
+  "use strict";
+
+  const COBS = (typeof module !== "undefined" && module.exports)
+    ? require("./cobs.js")
+    : root.COBS;
+
+  const OP_R = 0b10, OP_W = 0b01;
+  const OP_NAME = { 0b10: "READ", 0b01: "WRITE", 0b00: "ADDR", 0b11: "WR-INC" };
+  const DEVAD_NAME = { 1: "PMA/PMD", 3: "PCS", 4: "PHY-XS", 5: "DTE-XS", 7: "AN", 29: "C22ext", 30: "vendor2", 31: "vendor1" };
+  const REG_MMD_CTRL = 13, REG_MMD_DATA = 14;
+  const ONSET_N = 8, ONSET_BITS = (ONSET_N - 1) * 8;
+  const FLAG_OVF_PIOC = 1, FLAG_OVF_RAM = 2, FLAG_CONTINUED = 4;
+
+  const hex4 = v => v.toString(16).toUpperCase().padStart(4, "0");
+
+  // ---- bit-level Clause-22 decode ------------------------------------------
+  function bytesToBits(bs) {
+    const bits = [];
+    for (const v of bs) for (const k of [7, 6, 5, 4, 3, 2, 1, 0]) bits.push((v >> k) & 1);
+    return bits;
+  }
+  function bval(bits, lo, hi) { let v = 0; for (let i = lo; i < hi; i++) v = (v << 1) | bits[i]; return v; }
+
+  // Yield Clause-22 frames found in a bit list (preamble resync), mirrors decode_bits.
+  function decodeBits(bits) {
+    const out = [];
+    const n = bits.length;
+    let i = 0, ones = 0;
+    while (i < n) {
+      if (bits[i] === 1) { ones++; i++; continue; }
+      if (ones >= 32 && i + 32 <= n) {
+        const f = i;                                  // frame starts at i (32 bits)
+        if (bval(bits, f, f + 2) === 0b01) {           // ST = 01
+          out.push({
+            op: bval(bits, f + 2, f + 4), phyad: bval(bits, f + 4, f + 9),
+            regad: bval(bits, f + 9, f + 14), ta: bval(bits, f + 14, f + 16),
+            data: bval(bits, f + 16, f + 32), preamble: ones,
+          });
+          i += 32; ones = 0; continue;
+        }
+      }
+      ones = 0; i++;
+    }
+    return out;
+  }
+
+  // ---- MMD-indirect (Clause-45 over Clause-22) folding ---------------------
+  class MmdFolder {
+    constructor() { this.func = {}; this.devad = {}; this.addr = {}; }
+    reset() { this.func = {}; this.devad = {}; this.addr = {}; }
+    feed(fr) {                                         // -> [text|null, event|null]
+      const phy = fr.phyad, reg = fr.regad, op = fr.op, data = fr.data;
+      if (reg === REG_MMD_CTRL && op === OP_W) {
+        this.func[phy] = (data >> 14) & 0b11;
+        this.devad[phy] = data & 0x1F;
+        return [null, null];
+      }
+      if (reg === REG_MMD_DATA) {
+        const devad = this.devad[phy], func = this.func[phy];
+        if (devad === undefined || func === undefined) return [this._raw(fr), null];
+        if (func === 0b00) {
+          if (op === OP_W) { this.addr[phy + "_" + devad] = data; return [null, null]; }
+          return [this._raw(fr), null];
+        }
+        const key = phy + "_" + devad;
+        const addr = this.addr[key];
+        const dn = DEVAD_NAME[devad] || ("dev" + devad);
+        const where = addr !== undefined ? `MMD${devad}(${dn})[0x${hex4(addr)}]` : `MMD${devad}(${dn})[?]`;
+        const arrow = op === OP_R ? "=>" : "<=";
+        const kind = op === OP_R ? "read " : "write";
+        const text = `PHY${phy} ${where} ${kind} ${arrow} 0x${hex4(data)}`;
+        const ev = { phy, devad, addr: addr === undefined ? null : addr, op, data };
+        const inc = (func === 0b10) || (func === 0b11 && op === OP_W);
+        if (inc && addr !== undefined) this.addr[key] = (addr + 1) & 0xFFFF;
+        return [text, ev];
+      }
+      return [this._raw(fr), { phy, devad: null, addr: reg, op, data }];
+    }
+    _raw(fr) {
+      const arrow = fr.op === OP_R ? "=>" : "<=";
+      return `PHY${fr.phyad} C22 REG${fr.regad} ${OP_NAME[fr.op] || "?"} ${arrow} 0x${hex4(fr.data)}`;
+    }
+  }
+
+  // ---- COBS framing (binary mode, delimiter 0x00) --------------------------
+  function cobsDecode(buf) {
+    const out = [];
+    let i = 0; const n = buf.length;
+    while (i < n) {
+      const code = buf[i]; i++;
+      if (code === 0) break;
+      for (let k = 0; k < code - 1; k++) if (i + k < n) out.push(buf[i + k]);
+      i += code - 1;
+      if (code < 0xFF && i < n) out.push(0);
+    }
+    return out;
+  }
+  // wire=1: split a COBS stream on 0x00, decode each non-empty segment
+  function deframe(data) {
+    const recs = [];
+    let seg = [];
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 0) { if (seg.length) recs.push(cobsDecode(seg)); seg = []; }
+      else seg.push(data[i]);
+    }
+    if (seg.length) recs.push(cobsDecode(seg));
+    return recs;
+  }
+
+  // is a 0xFF-delimited segment an ASCII metadata block (0xFE[…]0xFE)?
+  function metaText(seg) {
+    if (seg.length < 3 || seg[0] !== 0xFE || seg[seg.length - 1] !== 0xFE) return null;
+    if (seg[1] !== 0x5B /* '[' */) return null;
+    for (let i = 1; i < seg.length - 1; i++) if (seg[i] < 0x20 || seg[i] > 0x7E) return null;
+    return String.fromCharCode.apply(null, Array.prototype.slice.call(seg, 1, seg.length - 1));
+  }
+
+  // wire=2: demultiplex the shared transport envelope. 0xFF = boundary; per
+  // segment, dispatch on leading byte (see header note). Returns decoded records
+  // plus any losses (0xFD) and metadata strings encountered.
+  function demuxV2(data) {
+    const recs = [], metas = []; let losses = 0;
+    let seg = [];
+    const flush = () => {
+      if (!seg.length) return;
+      if (seg.length === 1 && seg[0] === 0xFD) { losses++; }
+      else {
+        const m = metaText(seg);
+        if (m !== null) metas.push(m);
+        else { const d = COBS.cobsFfDecode(Uint8Array.from(seg)); if (d) recs.push(Array.from(d)); }
+      }
+      seg = [];
+    };
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 0xFF) flush();
+      else seg.push(data[i]);
+    }
+    flush();
+    return { recs, metas, losses };
+  }
+
+  function parseRecord(rec) {
+    if (rec.length < 12) return null;
+    const u = Uint8Array.from(rec);
+    const dv = new DataView(u.buffer);
+    const type = u[0];
+    const t_us = dv.getUint32(1, true);
+    const dur_us = dv.getUint16(5, true);
+    const onset_us = dv.getUint16(7, true);
+    const flags = u[9];
+    const n = dv.getUint16(10, true);
+    const payload = rec.slice(12, 12 + n);
+    if (payload.length !== n) return null;
+    return { type, t_us, dur_us, onset_us, flags, n, payload };
+  }
+
+  // wire defaults to 1. Returns { records, metas, losses }.
+  function recordsFromBinary(data, wire) {
+    const records = [];
+    let metas = [], losses = 0, recs;
+    if (wire === 2) { const d = demuxV2(data); recs = d.recs; metas = d.metas; losses = d.losses; }
+    else recs = deframe(data);
+    for (const rec of recs) {
+      const r = parseRecord(rec);
+      if (r && r.type === 0x01) records.push(r);
+    }
+    return { records, metas, losses };
+  }
+
+  // parse a 0xFE[…]0xFE ASCII block into a tagged object. The device emits only
+  // "[MODE … wire=N]" (active mode + format tag) and, under -D DIAG, "[T …]" telemetry;
+  // anything else falls through to { tag, raw }. (The device advertises MODE only;
+  // protocol/codec is a host concern, never on the wire.)
+  function parseMeta(text) {
+    const body = text.replace(/^\[|\]$/g, "").trim();
+    const tok = body.split(/\s+/);
+    const tag = tok[0];
+    if (tag === "MODE") {
+      const o = { tag, mode: tok[1] || null };
+      for (const t of tok.slice(2)) { const [k, v] = t.split("="); if (k) o[k] = v; }
+      if (o.wire !== undefined) o.wire = parseInt(o.wire, 10);
+      return o;
+    }
+    return { tag, raw: text };
+  }
+
+  // ---- stitch cap-split (FLAG_CONTINUED) records into logical bursts -------
+  class BurstJoiner {
+    constructor() { this._reset(); }
+    _reset() { this._pay = []; this._t0 = null; this._onset = 0; this._dur = 0; this._flags = 0; }
+    feed(rec) {
+      if (this._t0 === null) { this._t0 = rec.t_us; this._onset = rec.onset_us; }
+      this._pay = this._pay.concat(rec.payload);
+      this._dur += rec.dur_us;
+      this._flags |= rec.flags;
+      if (rec.flags & FLAG_CONTINUED) return null;
+      const out = { t_us: this._t0, dur_us: this._dur, onset_us: this._onset,
+                    flags: this._flags & ~FLAG_CONTINUED, payload: this._pay };
+      this._reset();
+      return out;
+    }
+  }
+  function logicalBursts(records) {
+    const out = []; const j = new BurstJoiner();
+    for (const r of records) { const lb = j.feed(r); if (lb) out.push(lb); }
+    return out;
+  }
+
+  // MDC CLOCK frequency in kHz — NOT a throughput. MDIO clocks exactly 1 bit per
+  // MDC cycle, so cycles/s == bits/s numerically; we report the physical quantity
+  // of interest (the clock), since burst/average bit-rate is biased by inter-frame
+  // idle. onset_us spans ONSET_BITS MDC cycles measured on an empty post-idle ring.
+  function onsetMdcKHz(onset_us) {
+    if (!onset_us) return null;
+    const f = ONSET_BITS / (onset_us / 1e6) / 1e3;     // kHz (== kbit/s value, 1 bit/cycle)
+    if (f < 50 || f > 20000) return null;              // plausible MDC range: 50 kHz .. 20 MHz
+    return f;
+  }
+
+  // ---- top-level: binary capture -> folded MDIO events ---------------------
+  // wire defaults to 1. Returns
+  //   { frames, events:[{phy,devad,addr,op,data,text}], bursts, metas:[…], losses }.
+  // metas are parsed transport blocks (parseMeta); the MDC clock comes from each
+  // record's onset_us (onsetMdcKHz), not a meta block.
+  function decodeCapture(data, wire) {
+    const { records, metas, losses } = recordsFromBinary(data, wire);
+    const bursts = logicalBursts(records);
+    const folder = new MmdFolder();
+    const frames = [], events = [];
+    for (const lb of bursts) {
+      for (const fr of decodeBits(bytesToBits(lb.payload))) {
+        frames.push(fr);
+        const [text, ev] = folder.feed(fr);
+        if (ev) events.push(Object.assign({ text }, ev));
+      }
+    }
+    return { frames, events, bursts, metas: metas.map(parseMeta), losses };
+  }
+
+  root.MDIO = {
+    OP_R, OP_W, OP_NAME, DEVAD_NAME, FLAG_OVF_PIOC, FLAG_OVF_RAM, FLAG_CONTINUED,
+    hex4, bytesToBits, decodeBits, MmdFolder, cobsDecode, deframe, demuxV2, metaText,
+    parseRecord, recordsFromBinary, parseMeta, BurstJoiner, logicalBursts,
+    onsetMdcKHz, decodeCapture,
+  };
+})(typeof module !== "undefined" && module.exports ? module.exports : (typeof window !== "undefined" ? window : globalThis));
+</script>
+<!-- /inline:test/mdio_codec.js -->
+<script>
+"use strict";
+const MDIO = window.MDIO;     // wire=2 SAMPLED codec (COBS-0xFF envelope)
+
+// ============================================================================
+//  CAN RLE decoder — faithful 1:1 port of can_rle_decode.py (validated source).
+//  Wire format: cap-continuation run-bytes 0x00..0x80 (0x80 = +128 same level,
+//  <0x80 = terminal, level flips). 0xFF = frame boundary, 0xFD = capture-loss,
+//  0xFE '[' ... 0xFE = diag block. 0x81..0xFC reserved/ignored.
+// ============================================================================
+const RECESSIVE = 1, DOMINANT = 0;
+const BOUNDARY = 56;                 // floor between 5-bit run and idle gap
+const BOUNDARY_RUN = 1 << 30;        // sentinel run length, above any threshold
+const BIN_BOUNDARY = 0xFF, BIN_LOSS = 0xFD, BIN_DIAG = 0xFE;
+
+function canCRC15(bits) {
+  let crc = 0;
+  for (const b of bits) {
+    const inb = b ^ ((crc >> 14) & 1);
+    crc = (crc << 1) & 0x7FFF;
+    if (inb) crc ^= 0x4599;
+  }
+  return crc;
+}
+
+function unstuff(bits) {                // drop the complementary bit after 5 identical
+  if (!bits.length) return [];
+  const out = [bits[0]];
+  let run = 1, last = bits[0];
+  for (let i = 1; i < bits.length; i++) {
+    const b = bits[i];
+    if (run === 5) { run = 1; last = b; continue; }
+    out.push(b);
+    run = (b === last) ? run + 1 : 1;
+    last = b;
+  }
+  return out;
+}
+
+// comb fit: for a candidate UI snap each run to k*UI+C, return (sse, C, ks)
+function combResidual(runs, ui, iters = 4) {
+  let c = 0.0, ks;
+  for (let it = 0; it < iters; it++) {
+    ks = runs.map(x => Math.max(1, Math.round((x - c) / ui)));
+    const res = runs.map((x, i) => x - ks[i] * ui).sort((a, b) => a - b);
+    c = res[res.length >> 1];
+  }
+  ks = runs.map(x => Math.max(1, Math.round((x - c) / ui)));
+  let sse = 0;
+  for (let i = 0; i < runs.length; i++) { const d = runs[i] - ks[i] * ui - c; sse += d * d; }
+  return { sse, c, ks };
+}
+
+function fitUI(counts) {                 // per-level clock recovery (comb sweep)
+  if (!counts.length) return [1.0, 0.0];
+  const c1 = Math.max(1, Math.min(...counts));
+  const inframe = counts.filter(x => x < 6 * c1);
+  const arr = inframe.length ? inframe : counts;
+  if (new Set(arr).size < 2) return [c1, 0.0];
+  const lo = 0.90 * c1, hi = 1.65 * c1;
+  const n = Math.max(1, Math.round((hi - lo) / 0.02));
+  let best = null;
+  for (let i = 0; i <= n; i++) {
+    const ui = lo + (hi - lo) * i / n;
+    if (ui <= 0) continue;
+    const { sse, c, ks } = combResidual(arr, ui);
+    if (new Set(ks).size < 2) continue;
+    const key0 = Math.round(sse * 1e6) / 1e6, key1 = -ui;
+    if (!best || key0 < best.k0 || (key0 === best.k0 && key1 < best.k1))
+      best = { k0: key0, k1: key1, ui, c };
+  }
+  return best ? [best.ui, best.c] : [c1, 0.0];
+}
+
+function fitBurstUI(counts) {            // -> (uiL,cL,uiH,cH); EXPENSIVE, fit once
+  const [uiL, cL] = fitUI(counts.filter((_, i) => i % 2 === 0));   // DOMINANT (SOF first)
+  const [uiH, cH] = fitUI(counts.filter((_, i) => i % 2 === 1));   // RECESSIVE
+  return [uiL > 0 ? uiL : 1.0, cL, uiH > 0 ? uiH : 1.0, cH];
+}
+
+function decodeBurstCal(runs, cal) {     // expand runs -> NRZ bits with KNOWN cal (cheap)
+  const [uiL, cL, uiH, cH] = cal;
+  const bits = [];
+  let level = DOMINANT;
+  for (const cnt of runs) {
+    const n = Math.max(1, Math.round(level === DOMINANT ? (cnt - cL) / uiL : (cnt - cH) / uiH));
+    for (let i = 0; i < n; i++) bits.push(level);
+    level ^= 1;
+  }
+  return bits;
+}
+
+function parseFrame(bits) {
+  if (bits.length < 1 + 11 + 3 + 4 + 15 || bits[0] !== DOMINANT) return null;
+  let pos = 0;
+  const take = n => { let v = 0; for (let i = 0; i < n; i++) v = (v << 1) | bits[pos++]; return v; };
+  take(1);                               // SOF
+  const id = take(11);
+  const rtr = take(1);
+  const ide = take(1);
+  if (ide === 1) return { extended: true, id };
+  take(1);                               // r0
+  const dlc = take(4);
+  const ndata = Math.min(dlc, 8);
+  const need = pos + ndata * 8 + 15;
+  if (bits.length < need) while (bits.length < need) bits.push(RECESSIVE);  // pad trailing recessive
+  const data = []; for (let i = 0; i < ndata; i++) data.push(take(8));
+  const crcInput = bits.slice(0, pos);
+  const crc = take(15);
+  const crcCalc = canCRC15(crcInput);
+  return { extended: false, id, rtr, dlc, data, crc, crcCalc, crcOk: crc === crcCalc };
+}
+
+function decodeFrameRuns(counts) {       // try as-is and with leading idle-tail dropped
+  let best = null;
+  for (let drop = 0; drop <= 1; drop++) {
+    if (drop >= counts.length) break;
+    const sub = counts.slice(drop);
+    if (sub.length < 4) continue;
+    const cal = fitBurstUI(sub);
+    const f = parseFrame(unstuff(decodeBurstCal(sub, cal)));
+    if (!f) continue;
+    const ui = (cal[0] + cal[2]) / 2.0;
+    if (!f.extended && f.crcOk) return { frame: f, ui, drop };
+    if (!best) best = { frame: f, ui, drop };
+  }
+  return best;
+}
+
+function frameBoundaryRuns(runs) {       // MIN-based (NOT percentile): max(56, 6*min)
+  let mn = Infinity;
+  for (const r of runs) if (r > 0 && r < mn) mn = r;
+  if (mn === Infinity) mn = BOUNDARY;
+  return Math.max(BOUNDARY, 6 * mn);
+}
+
+// ============================================================================
+//  Streaming processor — mirrors can_tui.py reader: binary -> runs -> frames,
+//  with the 3-tier cached calibration, load-shed, sync gating and 0xFD resync.
+// ============================================================================
+const FLUSH_AT   = 64;        // accumulate this many runs before splitting
+const MAX_WORK   = 600;       // runs processed per flush (UI thread can't block)
+const MAX_BACKLOG= 8000;      // drop oldest runs past this (load-shed)
+const SLOW_BUDGET= 8;         // expensive full-fits allowed per flush
+
+class StreamProc {
+  constructor(onFrame, onDiag, onLoss) {
+    this.onFrame = onFrame; this.onDiag = onDiag; this.onLoss = onLoss;
+    this.reset();
+  }
+  reset() {
+    this.runbuf = [];
+    this.cont = 0;
+    this.cal = null;            // no premature default: real UI~4.5 != soft-blob 7/8
+    this.bound = 0;             // cached boundary threshold
+    this.fe = false;            // saw a 0xFE, awaiting '[' to confirm a diag block
+    this.diag = null;           // collecting diag ascii (between 0xFE '[' and 0xFE)
+  }
+  feed(bytes) {
+    for (let k = 0; k < bytes.length; k++) {
+      const b = bytes[k];
+      if (this.diag !== null) {                       // inside a diag block
+        if (b === BIN_DIAG) { this.onDiag(this.diag); this.diag = null; }
+        else this.diag += String.fromCharCode(b);
+        continue;
+      }
+      if (this.fe) {                                  // previous byte was 0xFE
+        this.fe = false;
+        if (b === 0x5B) { this.diag = "["; continue; } // 0xFE '[' = real diag block
+        // stray 0xFE (mid-stream connect on a closing sentinel): drop it, handle b below
+      }
+      if (b === BIN_DIAG) { this.fe = true; continue; }
+      if (b === BIN_BOUNDARY || b === BIN_LOSS) {     // frame boundary / data lost here
+        if (b === BIN_LOSS) this.onLoss();            // 0xFD -> caller re-syncs framing
+        if (this.cont) { this.runbuf.push(this.cont); this.cont = 0; }
+        this.runbuf.push(BOUNDARY_RUN);
+      } else if (b === 0x80) {                         // continuation: +128, same level
+        this.cont += 128;
+      } else if (b < 0x80) {                           // terminal: run ends
+        this.runbuf.push(this.cont + b); this.cont = 0;
+      }                                                // 0x81..0xFC reserved -> ignore
+    }
+    if (this.runbuf.length >= FLUSH_AT) this.flush();
+  }
+  flush(force = false) {
+    if (!this.runbuf.length) return;
+    if (this.runbuf.length < FLUSH_AT && !force) return;
+    // load-shed: never let the backlog snowball (the cold-start feedback loop)
+    if (this.runbuf.length > MAX_BACKLOG) {
+      const drop = this.runbuf.length - MAX_BACKLOG;
+      this.runbuf.splice(0, drop); state.shed += drop;
+    }
+    const work = this.runbuf.length > MAX_WORK ? this.runbuf.slice(0, MAX_WORK) : this.runbuf;
+    if (!this.bound) this.bound = frameBoundaryRuns(work);
+    const budget = { n: SLOW_BUDGET };
+    let cur = [], last = 0;
+    for (let i = 0; i < work.length; i++) {
+      if (work[i] >= this.bound) {
+        if (cur.length >= 8) this.emit(cur, budget);
+        cur = []; last = i + 1;
+      } else cur.push(work[i]);
+    }
+    if (force && cur.length >= 8) { this.emit(cur, budget); last = work.length; }
+    if (last > 0) this.runbuf.splice(0, last);
+  }
+  emit(runs, budget) {
+    const c = this.cal;
+    // tier 1 — cached calibration (cheap). On a CRC-OK hit, ship it and return.
+    if (c) {
+      for (let drop = 0; drop <= 1; drop++) {
+        if (drop >= runs.length) break;
+        const sub = runs.slice(drop);
+        let f; try { f = parseFrame(unstuff(decodeBurstCal(sub, c))); } catch (e) { f = null; }
+        if (f && !f.extended && f.crcOk) { this.onFrame(f, (c[0] + c[2]) / 2, drop); return; }
+      }
+      // tier 2 — narrow re-fit around the current UI (cheap, ~11 candidates) and
+      //          REFRESH the cached cal: a frozen cal only locks ~46% at UI~4.5.
+      const ui0 = (c[0] + c[2]) / 2, loU = ui0 * 0.85, hiU = ui0 * 1.15;
+      for (let j = 0; j <= 10; j++) {
+        const ui = loU + (hiU - loU) * j / 10;
+        const nc = [ui, c[1], ui, c[3]];
+        for (let drop = 0; drop <= 1; drop++) {
+          if (drop >= runs.length) break;
+          const sub = runs.slice(drop);
+          let f; try { f = parseFrame(unstuff(decodeBurstCal(sub, nc))); } catch (e) { f = null; }
+          if (f && !f.extended && f.crcOk) { this.cal = nc; this.onFrame(f, ui, drop); return; }
+        }
+      }
+    }
+    // tier 3 — full comb fit (EXPENSIVE). Budgeted: drop past the per-flush quota.
+    if (budget.n <= 0) { state.shed++; return; }
+    budget.n--;
+    let best; try { best = decodeFrameRuns(runs); } catch (e) { best = null; }
+    if (!best) return;
+    if (best.frame.crcOk) this.cal = fitBurstUI(runs.slice(best.drop));   // refresh cal
+    this.onFrame(best.frame, best.ui, best.drop);
+  }
+}
+
+// ============================================================================
+//  Demo generator — synth a realistic multi-ID bus (counters + static + chase)
+//  so the grouped view and per-byte change highlight actually show something.
+// ============================================================================
+function stuff(bits) {
+  const out = []; let run = 0, last = null;
+  for (const b of bits) {
+    out.push(b);
+    run = (b === last) ? run + 1 : 1; last = b;
+    if (run === 5) { const s = 1 - b; out.push(s); run = 1; last = s; }
+  }
+  return out;
+}
+function buildFrameBits(canId, data) {
+  const core = [DOMINANT];
+  for (let k = 0; k < 11; k++) core.push((canId >> (10 - k)) & 1);
+  core.push(0, 0, 0);                                   // RTR, IDE, r0
+  for (let k = 0; k < 4; k++) core.push((data.length >> (3 - k)) & 1);
+  for (const byte of data) for (let k = 0; k < 8; k++) core.push((byte >> (7 - k)) & 1);
+  const crc = canCRC15(core);
+  for (let k = 0; k < 15; k++) core.push((crc >> (14 - k)) & 1);
+  return stuff(core).concat([1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);   // CRCdelim..EOF/IFS
+}
+function bitsToRuns(bits) {
+  const runs = []; let i = 0;
+  while (i < bits.length) { let j = i; while (j < bits.length && bits[j] === bits[i]) j++; runs.push([bits[i], j - i]); i = j; }
+  return runs;
+}
+function frameToContinuation(bits, uiD = 5, uiR = 5, cD = -1, cR = -1) {   // ~UI 4.5, like real hw
+  const out = [];
+  for (const [val, blen] of bitsToRuns(bits)) {
+    let t = val === RECESSIVE ? blen * uiR + cR : blen * uiD + cD;
+    if (t < 1) t = 1;
+    while (t >= 128) { out.push(0x80); t -= 128; }
+    out.push(t & 0x7F);
+  }
+  return out;
+}
+
+const DEMO_NODES = [
+  { id: 0x0A0, period: 10,  kind: 'counter' },     // 100 Hz powertrain counter
+  { id: 0x120, period: 20,  kind: 'static'  },      // 50 Hz constant
+  { id: 0x244, period: 50,  kind: 'chase'   },      // 20 Hz moving payload
+  { id: 0x301, period: 100, kind: 'counter' },      // 10 Hz
+  { id: 0x555, period: 100, kind: 'sweep'   },      // 10 Hz analog-ish sweep
+  { id: 0x7DF, period: 500, kind: 'static'  },      // OBD request, slow
+];
+function demoPayload(node, tick) {
+  const d = [0,0,0,0,0,0,0,0];
+  if (node.kind === 'counter') { d[0] = tick & 0xFF; d[1] = (tick >> 8) & 0xFF; d[6] = 0xA5; d[7] = (d[0] ^ d[1]) & 0xFF; }
+  else if (node.kind === 'static') { return [0xDE,0xAD,0xBE,0xEF,0x00,0x00,0x12,0x34]; }
+  else if (node.kind === 'chase')  { d[tick % 8] = 0xFF; d[7] = tick & 0xFF; }
+  else if (node.kind === 'sweep')  { const v = Math.round(127 + 120 * Math.sin(tick / 12)); d[0]=v; d[1]=255-v; d[2]=tick&0xFF; }
+  return d;
+}
+
+// ============================================================================
+//  App state + ID model
+// ============================================================================
+const state = {
+  frames: 0, ok: 0, bad: 0, loss: 0, shed: 0,
+  ids: new Map(),               // id -> {id,count,firstT,lastT,dt[],dlc,data[],changed[]}
+  win: [],                      // OK-frame timestamps (1 s) -> fps
+  sparkHist: [],                // fps samples (one per 250 ms tick), last ~120
+  usbWin: 0,                    // bytes this 1 s window
+  usbBytes: 0,
+  trace: [],                    // bounded ring of recent OK frames for Trace view
+  synced: false,                // gate display until first CRC-OK (kills phantom IDs)
+  recording: false, recBuf: [],
+  port: null, reader: null, demoTimer: null, demoTick: 0,
+  view: 'grid', sortKey: 'id', sortDir: 1,
+  protocol: 'can',              // 'can' | 'dmx' — host-side interpretation of the same stream
+  dirty: true,                  // grid needs rebuild
+  lastDecodeT: 0, _prevCount: -1,  // "traffic but no recognised frames" detector
+};
+function feedActive(bytes) {
+  sniffMeta(bytes);                                          // detect [MODE] in any mode
+  if (state.protocol === 'mdio') mdioFeed(bytes);
+  else if (state.protocol === 'dmx') dmxProc.feed(bytes);
+  else proc.feed(bytes);
+}
+const TRACE_MAX = 600;
+
+const $ = id => document.getElementById(id);
+const elGrid = $('grid'), elTrace = $('trace-wrap'), elEmpty = $('empty');
+
+// ---- frame intake (mirrors can_tui add()/add_frame clean-display policy) ----
+function onFrame(frame, ui, drop) {
+  const now = performance.now();
+  state.frames++;
+  if (frame.extended) { state.bad++; return; }
+  if (frame.crcOk) {
+    state.synced = true;
+  } else {
+    if (!state.synced) return;          // pre-sync garbage: drop, do not count
+    state.bad++;                         // post-sync BAD: count, never display
+    return;
+  }
+  // ---- CRC-OK frame: the only thing that ever reaches the views ----
+  state.ok++;
+  state.win.push(now);
+  while (state.win.length && now - state.win[0] > 1000) state.win.shift();
+
+  let e = state.ids.get(frame.id);
+  if (!e) {
+    e = { id: frame.id, count: 0, firstT: now, lastT: now, dt: [],
+          dlc: frame.dlc, data: frame.data.slice(), changed: new Array(8).fill(0), isNew: true };
+    state.ids.set(frame.id, e);
+  } else {
+    e.dt.push(now - e.lastT); if (e.dt.length > 64) e.dt.shift();   // 64 = enough averaging to kill timer quantisation
+    for (let i = 0; i < frame.data.length; i++)
+      if (frame.data[i] !== e.data[i]) e.changed[i] = now;     // per-byte change stamp
+    e.data = frame.data.slice();
+    e.dlc = frame.dlc;
+  }
+  e.lastT = now; e.count++;
+
+  state.trace.push({ t: now, id: frame.id, dlc: frame.dlc, data: frame.data });
+  if (state.trace.length > TRACE_MAX) state.trace.shift();
+  state.dirty = true;
+}
+function onLoss() { state.loss++; state.synced = false; }    // resync after a gap
+function onDiag(text) {
+  const m = text.match(/ovf=(\d+)/);                          // surface device ovf as loss
+  if (m) state.loss = Math.max(state.loss, parseInt(m[1], 10));
+}
+const proc = new StreamProc(onFrame, onDiag, onLoss);
+
+// ============================================================================
+//  Rendering — 250 ms tick rebuilds the grouped table + stats + sparkline.
+//  (At ~6000 fps you cannot DOM-update per frame; snapshot the model instead.)
+// ============================================================================
+function median(a) { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; }
+// Per-ID rate = frames / total time across the dt buffer. Averaging cancels performance.now()
+// quantisation (a 0.25 ms period reads as 0.2/0.3 ms per sample); median picked one quantum and
+// so oscillated 3333<->5000 Hz at a flat 4000 fps. The average is steady.
+function idRate(e)   { const n = e.dt.length; if (!n) return 0; let s = 0; for (const d of e.dt) s += d; return s > 0 ? 1000 * n / s : 0; }
+function idPeriod(e) { const r = idRate(e); return r > 0 ? 1000 / r : 0; }
+
+function fmtID(id)  { return '0x' + id.toString(16).toUpperCase().padStart(3, '0'); }
+function fmtByte(b) { return b.toString(16).toUpperCase().padStart(2, '0'); }
+
+function rebuildGrid(now) {
+  const rows = [...state.ids.values()];
+  const k = state.sortKey, dir = state.sortDir;
+  rows.sort((a, b) => {
+    let va, vb;
+    if (k === 'id') { va = a.id; vb = b.id; }
+    else if (k === 'count') { va = a.count; vb = b.count; }
+    else if (k === 'dlc') { va = a.dlc; vb = b.dlc; }
+    else { const pa = idPeriod(a) || 1e9, pb = idPeriod(b) || 1e9;     // rate & period
+           va = (k === 'rate') ? 1 / pa : pa; vb = (k === 'rate') ? 1 / pb : pb; }
+    return (va - vb) * dir;
+  });
+
+  const frag = document.createDocumentFragment();
+  for (const e of rows) {
+    const rate = idRate(e);
+    const per = rate > 0 ? (1000 / rate) : 0;
+    const age = now - e.lastT;
+    const stale = age > Math.max(600, 4 * (per || 250));     // node went quiet
+    const act = age < 260;                                   // frame seen this render window -> ACT LED
+    const tr = document.createElement('tr');
+    tr.className = (e.isNew ? 'fresh ' : '') + (stale ? 'stale' : '');
+    e.isNew = false;
+
+    let bytesHTML = '';
+    if (e.data.length === 0) bytesHTML = '<span class="data-empty">—</span>';
+    else for (let i = 0; i < e.data.length; i++) {
+      const since = now - e.changed[i];
+      let bg = 'transparent', col = '';
+      if (e.changed[i] && since < 1200) {                    // amber fade on change
+        const a = (1 - since / 1200) * 0.5;
+        bg = `rgba(242,185,80,${a.toFixed(3)})`; col = 'color:#1a1206;';
+      }
+      bytesHTML += `<span class="byte" style="background:${bg};${col}">${fmtByte(e.data[i])}</span>`;
+    }
+    tr.innerHTML =
+      `<td class="col-id"><span class="live-dot${act && !stale ? ' act' : ''}"></span>${fmtID(e.id)}</td>` +
+      `<td class="col-rate">${rate >= 1 ? rate.toFixed(0) : rate.toFixed(1)} Hz</td>` +
+      `<td class="col-per">${per ? per.toFixed(per < 10 ? 1 : 0) + ' ms' : '—'}</td>` +
+      `<td class="col-cnt">${e.count}</td>` +
+      `<td class="col-dlc">${e.dlc}</td>` +
+      `<td class="bytes">${bytesHTML}</td>`;
+    frag.appendChild(tr);
+  }
+  elGrid.replaceChildren(frag);
+}
+
+function rebuildTrace() {
+  const frag = document.createDocumentFragment();
+  const list = state.trace.slice(-300);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const f = list[i];
+    const d = f.data.map(fmtByte).join(' ');
+    const div = document.createElement('div');
+    div.className = 'trow';
+    div.innerHTML = `<span class="t">${(f.t / 1000).toFixed(3)}s</span>` +
+      `<span class="id">${fmtID(f.id)}</span><span>${f.dlc}</span><span class="d">${d}</span>`;
+    frag.appendChild(div);
+  }
+  elTrace.replaceChildren(frag);
+}
+
+function drawSparkOn(cv, data) {
+  const ctx = cv.getContext('2d');
+  const dpr = devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;                                       // hidden canvas -> skip
+  if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (data.length < 2) return;
+  const max = Math.max(10, ...data);
+  const step = w / (data.length - 1);
+  const plot = () => data.forEach((v, i) => { const x = i * step, y = h - (v / max) * (h - 2) - 1; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.beginPath(); plot(); ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+  ctx.fillStyle = 'rgba(90,166,255,0.12)'; ctx.fill();
+  ctx.beginPath(); plot();
+  ctx.strokeStyle = '#5aa6ff'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function setText(id, v) { const el = $(id); if (el.firstChild && el.firstChild.nodeType === 3) el.firstChild.nodeValue = v; else el.textContent = v; }
+
+function tick() {
+  const now = performance.now();
+  const usbKB = state.usbWin / 1024 * 4;                     // /250ms -> /s
+  state.usbWin = 0;
+
+  if (state.protocol === 'can') {
+    const fps = state.win.length;                            // OK frames in last 1 s
+    state.sparkHist.push(fps); if (state.sparkHist.length > 120) state.sparkHist.shift();
+    setText('s-frames', state.frames); setText('s-fps', fps);
+    setText('s-ok', state.ok); setText('s-bad', state.bad);
+    setText('s-ids', state.ids.size); setText('s-loss', state.loss);
+    setText('s-shed', state.shed); setText('s-usb', usbKB.toFixed(0));
+    elEmpty.style.display = state.frames ? 'none' : 'flex';
+    if (state.view === 'grid') { if (state.dirty || state.ids.size) rebuildGrid(now); state.dirty = false; }
+    else rebuildTrace();
+    drawSparkOn($('spark'), state.sparkHist);
+  } else if (state.protocol === 'mdio') {
+    setText('m-frames', mdio.frames); setText('m-fps', mdio.win.length);
+    setText('m-phys', new Set([...mdio.regs.values()].map(e => e.phy)).size);
+    setText('m-regs', mdio.regs.size); setText('m-mmd', mdio.mmdAcc);
+    setText('m-clk', mdio.clk ? mdio.clk.toFixed(0) : '—');
+    setText('m-loss', mdio.loss); setText('m-usb', usbKB.toFixed(0));
+    while (mdio.win.length && now - mdio.win[0] > 1000) mdio.win.shift();
+    elEmpty.style.display = mdio.frames ? 'none' : 'flex';
+    rebuildMdio(now);
+  } else {
+    const recent = dmx.win.filter(t => now - t <= 2000);
+    const hz = (recent.length >= 2 && recent[recent.length - 1] > recent[0])
+             ? recent.length / ((recent[recent.length - 1] - recent[0]) / 1000) : 0;
+    dmx.sparkHist.push(hz); if (dmx.sparkHist.length > 120) dmx.sparkHist.shift();
+    setText('d-packets', dmx.packets); setText('d-refresh', hz.toFixed(1));
+    setText('d-slots', dmx.nslots);
+    setText('d-scode', dmx.startCode === null ? '—' : (dmx.startCode === 0 ? 'dimmer' : ('0x' + dmx.startCode.toString(16).toUpperCase().padStart(2, '0'))));
+    setText('d-rejected', dmx.rejected); setText('d-loss', dmx.loss); setText('d-usb', usbKB.toFixed(0));
+    elEmpty.style.display = dmx.packets ? 'none' : 'flex';
+    rebuildDmx(now);
+    drawSparkOn($('spark2'), dmx.sparkHist);
+  }
+
+  // "traffic but no recognised frames": data is flowing but the active protocol decodes nothing.
+  // Smooth by construction — the banner only appears after STALL_MS of sustained throughput with no
+  // new frame, and clears the instant a frame returns (count bumps lastDecodeT). The time threshold
+  // IS the hysteresis, so brief gaps never make it flicker.
+  {
+    const cnt = state.protocol === 'mdio' ? mdio.frames : state.protocol === 'dmx' ? dmx.packets : state.frames;
+    if (cnt !== state._prevCount) { state._prevCount = cnt; state.lastDecodeT = now; }
+    const flowing = usbKB >= 0.5;                                  // bytes actually arriving (~KB/s)
+    const stalled = (now - state.lastDecodeT) > 2000;             // no decoded frame for 2 s
+    const warn = (state.port || state.demoTimer) && flowing && stalled;
+    const nosig = $('nosig');
+    if (warn) {
+      nosig.textContent = `⚠ Traffic detected (${usbKB.toFixed(0)} KB/s) but no ${state.protocol.toUpperCase()} frames recognised — wrong protocol?`;
+      nosig.classList.add('on');
+    } else nosig.classList.remove('on');
+  }
+
+  $('brand').classList.toggle('live', !!(state.port || state.demoTimer));
+}
+setInterval(tick, 250);
+
+// ============================================================================
+//  Web Serial
+// ============================================================================
+const WARMUP_MS = 200;        // discard the stale USB-controller burst at connect
+function resetCan() {
+  proc.reset();
+  state.frames = state.ok = state.bad = state.loss = state.shed = 0;
+  state.ids.clear(); state.win = []; state.trace = []; state.synced = false;
+  state.usbBytes = 0; state.usbWin = 0; state.dirty = true;
+  elGrid.replaceChildren(); elTrace.replaceChildren();
+}
+
+async function connect() {
+  if (!navigator.serial) { $('status').textContent = 'No Web Serial'; return; }
+  try {
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200, bufferSize: 65536 });   // CDC ignores baud; USB bulk
+    state.port = port;
+    $('status').textContent = 'Connected';
+    $('btn-connect').textContent = 'Disconnect';
+    $('btn-connect').classList.remove('primary');
+    resetActive();
+    readLoop(port);
+  } catch (e) { $('status').textContent = e.name === 'NotFoundError' ? 'No port selected' : ('Error: ' + e.message); }
+}
+
+async function readLoop(port) {
+  const reader = port.readable.getReader();
+  state.reader = reader;
+  const warmUntil = performance.now() + WARMUP_MS;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || !value.length) continue;
+      if (performance.now() < warmUntil) continue;            // drop the connect burst
+      const bytes = value;                                    // Uint8Array
+      state.usbBytes += bytes.length; state.usbWin += bytes.length;
+      if (state.recording) state.recBuf.push(bytes.slice());
+      feedActive(bytes);
+    }
+  } catch (e) { /* disconnect / cancel */ }
+  finally {
+    reader.releaseLock();                        // MUST precede port.close() or the stream
+    if (state.protocol === 'can') proc.flush(true);  // stays locked and the OS never frees the port
+    try { await port.close(); } catch (e) {}     // now safe: lock released -> port returns to the OS
+    state.port = null; state.reader = null;
+    $('status').textContent = 'Disconnected';
+    $('btn-connect').textContent = 'Connect';
+    $('btn-connect').classList.add('primary');
+  }
+}
+
+// Cancel the reader and let readLoop's finally release the lock THEN close the port (so
+// the OS frees it for CoolTerm/etc). Closing here would race the releaseLock and leave
+// the port locked. If no reader is running, close directly. */
+async function disconnect() {
+  if (state.reader) {
+    try { await state.reader.cancel(); } catch (e) {}   // -> readLoop finally: releaseLock + close
+  } else if (state.port) {
+    try { await state.port.close(); } catch (e) {}
+    state.port = null;
+  }
+}
+
+// ============================================================================
+//  Demo mode
+// ============================================================================
+function startDemo() {
+  if (state.demoTimer) { stopDemo(); return; }
+  if (state.port) return;
+  $('btn-demo').classList.add('active');
+  $('status').textContent = 'Demo';
+  resetActive();
+  state.demoTick = 0;
+  if (state.protocol === 'dmx') {
+    state.demoTimer = setInterval(() => {                     // ~44 Hz DMX universe
+      const slots = dmxDemoPacket(state.demoTick++);
+      const wire = new Uint8Array(runsToWireJS(encodePacketJS(slots, 22, -1)));
+      state.usbWin += wire.length;
+      dmxProc.feed(wire);
+    }, 23);
+    return;
+  }
+  if (state.protocol === 'mdio') {
+    onModeMarker('clocked');                                  // demo device is in clocked mode
+    state.demoTimer = setInterval(() => {                     // ~7 polling cycles/s + ~1s [MODE]
+      const t = state.demoTick++;
+      if (t % 7 === 0) { const hb = mdioMetaSeg('[MODE clocked wire=2]'); state.usbWin += hb.length; mdioIntake(hb); }
+      const seg = mdioDemoCycle(t);
+      state.usbWin += seg.length;
+      mdioIntake(seg);
+    }, 140);
+    return;
+  }
+  const dueAt = DEMO_NODES.map(() => 0);
+  state.demoTimer = setInterval(() => {
+    const t = (state.demoTick += 1) * 4;                      // ms, 4 ms scheduler
+    for (let i = 0; i < DEMO_NODES.length; i++) {
+      const node = DEMO_NODES[i];
+      if (t < dueAt[i]) continue;
+      dueAt[i] = t + node.period;
+      const data = demoPayload(node, Math.floor(t / node.period));
+      const bytes = frameToContinuation(buildFrameBits(node.id, data));
+      const pkt = new Uint8Array([0xFF, ...bytes, 0xFF]);
+      state.usbWin += pkt.length;
+      proc.feed(pkt);
+    }
+  }, 4);
+}
+function stopDemo() {
+  clearInterval(state.demoTimer); state.demoTimer = null;
+  $('btn-demo').classList.remove('active');
+  $('status').textContent = 'Demo stopped';
+}
+
+// ============================================================================
+//  Record / Export / Clear
+// ============================================================================
+function toggleRecord() {
+  state.recording = !state.recording;
+  const b = $('btn-record');
+  if (state.recording) { state.recBuf = []; b.classList.add('active'); b.textContent = '■ Stop'; $('btn-export').disabled = true; }
+  else { b.classList.remove('active'); b.textContent = '● Rec'; $('btn-export').disabled = state.recBuf.length === 0; }
+}
+function exportBin() {
+  if (!state.recBuf.length) return;
+  const total = state.recBuf.reduce((a, c) => a + c.length, 0);
+  const out = new Uint8Array(total); let off = 0;
+  for (const c of state.recBuf) { out.set(c, off); off += c.length; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([out], { type: 'application/octet-stream' }));
+  a.download = 'tapioca_capture.bin';            // (no Date.now in this env; rename on save)
+  a.click(); URL.revokeObjectURL(a.href);
+}
+function clearAll() { resetActive(); }
+
+// ============================================================================
+//  DMX512 decoder — faithful 1:1 port of dmx_rle_decode.py (bit-for-bit parity
+//  with the Python selftest: UI 21.0/17.0/28.5). Same binary front-end as CAN;
+//  a tick-accurate resyncing UART 8N2 sampler lays runs on a fractional-bit axis.
+// ============================================================================
+const BREAK_BITS = 16, IDLE_SEP_BITS = 4;
+function bisectRight(a, x) { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= x) lo = m + 1; else hi = m; } return lo; }
+
+function assignLevels(runs, idleHigh) {            // absolute level per run, re-anchor on '|'
+  const idle = idleHigh ? 1 : 0; const out = []; let lv = idle;
+  for (const r of runs) { if (r >= BOUNDARY_RUN) { out.push(idle); lv = idle ^ 1; } else { out.push(lv); lv ^= 1; } }
+  return out;
+}
+class Timeline {                                   // runs on a fractional-bit axis (no rounding)
+  constructor(runs, levels, uiLo, uiHi) {
+    this.segs = []; this.bounds = []; let pos = 0;
+    for (let k = 0; k < runs.length; k++) {
+      const r = runs[k]; let dur, l;
+      if (r >= BOUNDARY_RUN) { this.bounds.push(pos); dur = IDLE_SEP_BITS; l = 1; }
+      else { l = levels[k]; dur = r / (l ? uiHi : uiLo); }
+      if (dur <= 0) continue;
+      this.segs.push([pos, pos + dur, l]); pos += dur;
+    }
+    this.starts = this.segs.map(s => s[0]); this.end = pos;
+  }
+  levelAt(p) { const i = bisectRight(this.starts, p) - 1; if (i < 0 || i >= this.segs.length) return 1; const s = this.segs[i]; return p < s[1] ? s[2] : 1; }
+  nextFalling(p) { let i = bisectRight(this.starts, p); while (i < this.segs.length) { if (this.segs[i][2] === 0) return this.segs[i][0]; i++; } return null; }
+}
+function uartSample(tl, pStart, pEnd) {            // resyncing UART 8N2, sample bit centres
+  const out = []; let errs = 0;
+  let p = tl.nextFalling(pStart - 1e-9);
+  while (p !== null && p + 9.5 <= pEnd) {
+    if (tl.levelAt(p + 0.5) !== 0) { p = tl.nextFalling(p + 0.5); continue; }   // START must be LOW
+    let val = 0;
+    for (let k = 0; k < 8; k++) if (tl.levelAt(p + 1.5 + k)) val |= (1 << k);    // data LSB-first
+    if (tl.levelAt(p + 9.5) !== 1) { errs++; const nf = tl.nextFalling(p + 0.5); if (nf === null || nf <= p) break; p = nf; continue; }
+    out.push(val);
+    const nf = tl.nextFalling(p + 9.5); if (nf === null) break; p = nf;          // resync on next START
+  }
+  return [out, errs];
+}
+function firstBreakEnd(tl, pStart, pEnd) {         // end of the first BREAK LOW = MAB/slots start
+  let i = bisectRight(tl.starts, pStart); if (i > 0) i--;
+  while (i < tl.segs.length) { const [s, e, lv] = tl.segs[i]; if (s >= pEnd) break; if (lv === 0 && (e - s) >= BREAK_BITS) return e; i++; }
+  return null;
+}
+function decodeTimeline(tl) {                      // one frame per firmware '|', else split on BREAK
+  let regions;
+  if (tl.bounds.length) { const edges = [...tl.bounds, tl.end]; regions = []; for (let k = 0; k < edges.length - 1; k++) regions.push([edges[k], edges[k + 1]]); }
+  else { const brk = []; for (let i = 0; i < tl.segs.length; i++) { const [s, e, lv] = tl.segs[i]; if (lv === 0 && (e - s) >= BREAK_BITS) brk.push(s); } regions = []; for (let k = 0; k < brk.length; k++) regions.push([brk[k], k + 1 < brk.length ? brk[k + 1] : tl.end]); }
+  const packets = [], perrs = [];
+  for (const [p0, p1] of regions) { const mab = firstBreakEnd(tl, p0, p1); if (mab === null) continue; const [slots, e] = uartSample(tl, mab, p1); if (slots.length) { packets.push(slots); perrs.push(e); } }
+  return [packets, perrs];
+}
+function dmxScore(packets, errs) { let good = 0; for (const p of packets) if (p.length && p[0] === 0x00) good += p.length; return good - 5 * errs; }
+function dmxCalibrate(runs) {                       // scan UI + both polarities, score on DMX structure (once)
+  const bidx = []; for (let i = 0; i < runs.length; i++) if (runs[i] >= BOUNDARY_RUN) bidx.push(i);
+  const sub = bidx.length > 4 ? runs.slice(0, bidx[4]) : runs;
+  let best = null;
+  for (const idleHigh of [true, false]) {
+    const levels = assignLevels(sub, idleHigh);
+    for (let uiT = 150; uiT <= 330; uiT += 5) {
+      const ui = uiT / 10;
+      const [pk, pe] = decodeTimeline(new Timeline(sub, levels, ui, ui));
+      const sc = dmxScore(pk, pe.reduce((a, b) => a + b, 0));
+      if (best === null || sc > best[0]) best = [sc, ui, idleHigh];
+    }
+  }
+  return [best[1], best[2]];
+}
+function dmxDecodeWith(runs, ui, idleHigh) { const levels = assignLevels(runs, idleHigh); return decodeTimeline(new Timeline(runs, levels, ui, ui)); }
+
+function captureToRunsJS(data) {                   // binary capture -> runs (port of capture_to_runs)
+  const segs = []; let cur = []; let i = 0; const n = data.length;
+  while (i < n) {
+    const b = data[i];
+    if (b === 0xFF || b === 0xFD) { segs.push(cur); cur = []; }
+    else if (b === 0xFE && i + 1 < n && data[i + 1] === 0x5B) { i += 2; while (i < n && data[i] !== 0xFE) i++; }
+    else if (b <= 0x80) cur.push(b);
+    i++;
+  }
+  segs.push(cur);
+  const runs = []; let acc = 0;
+  for (let si = 0; si < segs.length; si++) {
+    if (si) { if (acc) { runs.push(acc); acc = 0; } runs.push(BOUNDARY_RUN); }   // PIPE = hard cut
+    for (const b of segs[si]) { if (b >= 128) acc += 128; else { runs.push(acc + b); acc = 0; } }
+  }
+  return runs;
+}
+
+// DMX stream processor — batch on 0xFF boundaries, cache calibration, recalibrate
+// when a batch decodes nothing plausible (mirrors dmx_tui.py reader).
+class DmxProc {
+  constructor(onPacket) { this.onPacket = onPacket; this.reset(); }
+  reset() { this.acc = []; this.cal = null; }
+  feed(bytes) {
+    let nb = 0;
+    for (let k = 0; k < bytes.length; k++) { const b = bytes[k]; this.acc.push(b); if (b === 0xFF) nb++; if (b === 0xFD) dmx.loss++; }
+    let count = 0; for (let i = 0; i < this.acc.length; i++) if (this.acc[i] === 0xFF) count++;
+    if (count >= 8) {
+      let cut = -1; for (let i = this.acc.length - 1; i >= 0; i--) if (this.acc[i] === 0xFF) { cut = i; break; }
+      const head = this.acc.slice(0, cut + 1);
+      this.acc = this.acc.slice(cut);                 // keep last 0xFF as leading boundary
+      this.decodeBatch(head);
+    }
+    if (this.acc.length > 200000) this.acc = this.acc.slice(-100000);   // runaway guard
+  }
+  decodeBatch(buf) {
+    const runs = captureToRunsJS(new Uint8Array(buf));
+    if (!runs.length) return;
+    if (this.cal === null) this.cal = dmxCalibrate(runs);
+    const [packets] = dmxDecodeWith(runs, this.cal[0], this.cal[1]);
+    if (!packets.some(p => p.length && p[0] === 0x00)) this.cal = null;   // wrong lock -> re-fit
+    for (const p of packets) this.onPacket(p);
+  }
+}
+
+const dmx = {
+  packets: 0, rejected: 0, rejectStreak: 0, loss: 0,
+  nslots: 0, startCode: null, explen: null, lenseen: [],
+  chans: new Array(512).fill(0), changed: new Array(512).fill(0),
+  win: [], sparkHist: [], lastT: 0,
+};
+function modeOf(arr) { const m = new Map(); let bk = arr[0], bn = 0; for (const v of arr) { const c = (m.get(v) || 0) + 1; m.set(v, c); if (c > bn) { bn = c; bk = v; } } return bk; }
+
+// intake (mirrors dmx_tui add_packet): lock universe size on 0x00 frames only,
+// self-heal a wrong lock after 32 consecutive rejects, never show garbage.
+function onDmxPacket(p) {
+  const now = performance.now();
+  if (dmx.explen !== null && (p[0] !== 0x00 || p.length !== dmx.explen)) {
+    dmx.rejected++; dmx.rejectStreak++;
+    if (dmx.rejectStreak >= 32) { dmx.explen = null; dmx.lenseen = []; dmx.rejectStreak = 0; }
+    return;
+  }
+  if (dmx.explen === null) {
+    if (p[0] === 0x00) { dmx.lenseen.push(p.length); if (dmx.lenseen.length >= 8) dmx.explen = modeOf(dmx.lenseen); }
+    return;
+  }
+  dmx.rejectStreak = 0; dmx.packets++;
+  dmx.win.push(now); while (dmx.win.length && now - dmx.win[0] > 2000) dmx.win.shift();
+  dmx.startCode = p[0]; const slots = p.slice(1); dmx.nslots = slots.length;
+  for (let i = 0; i < slots.length && i < 512; i++) if (slots[i] !== dmx.chans[i]) { dmx.chans[i] = slots[i]; dmx.changed[i] = now; }
+  dmx.lastT = now;
+}
+const dmxProc = new DmxProc(onDmxPacket);
+
+// ============================================================================
+//  MDIO (clocked / SAMPLED) — codec from mdio_codec.js (wire=2), view = one row
+//  per (PHY, register target). Single-source codec from mdio_codec.js.
+// ============================================================================
+const mdio = { frames: 0, win: [], regs: new Map(), folder: new MDIO.MmdFolder(),
+               mmdAcc: 0, clk: null, loss: 0, _leftover: null, _synced: false,
+               _joiner: new MDIO.BurstJoiner() };   // stitch cap-split (FLAG_CONTINUED) records
+function resetMdio() {
+  mdio.frames = 0; mdio.win = []; mdio.regs.clear(); mdio.folder = new MDIO.MmdFolder();
+  mdio.mmdAcc = 0; mdio.clk = null; mdio.loss = 0; mdio._leftover = null; mdio._synced = false;
+  mdio._joiner = new MDIO.BurstJoiner();
+  $('mdio-grid').replaceChildren();
+}
+function mdioTargetOf(ev) {
+  return ev.devad === null
+    ? { key: `${ev.phy}|C22 REG${ev.addr}`, target: `C22 REG${ev.addr}`, mmd: false }
+    : { key: `${ev.phy}|MMD${ev.devad}[${ev.addr === null ? '?' : '0x' + MDIO.hex4(ev.addr)}]`,
+        target: `MMD${ev.devad}(${MDIO.DEVAD_NAME[ev.devad] || 'dev' + ev.devad})[${ev.addr === null ? '?' : '0x' + MDIO.hex4(ev.addr)}]`, mmd: true };
+}
+function mdioOnEvent(ev) {
+  const now = performance.now(), t = mdioTargetOf(ev);
+  let e = mdio.regs.get(t.key);
+  if (!e) { e = { phy: ev.phy, target: t.target, mmd: t.mmd, op: ev.op, data: ev.data,
+                  count: 0, lastT: now, dt: [], changedAt: 0, isNew: true }; mdio.regs.set(t.key, e); }
+  else { e.dt.push(now - e.lastT); if (e.dt.length > 16) e.dt.shift(); if (ev.data !== e.data) e.changedAt = now; }
+  e.op = ev.op; e.data = ev.data; e.lastT = now; e.count++;
+  if (t.mmd) mdio.mmdAcc++;
+}
+function mdioConcat(a, b) { if (!a || !a.length) return b; const o = new Uint8Array(a.length + b.length); o.set(a, 0); o.set(b, a.length); return o; }
+// streaming: only decode up to the last 0xFF boundary so a record never tears
+// across read chunks; keep the tail for next time. ([MODE] is sniffed separately.)
+function mdioFeed(bytes) {
+  let buf = mdioConcat(mdio._leftover, bytes);
+  if (!mdio._synced) {                          // joined mid-stream (connect): the bytes before
+    const first = buf.indexOf(0xFF);            // the FIRST boundary are a partial record with no
+    if (first < 0) { mdio._leftover = buf; return; }  // leading 0xFF -> not a complete record, drop
+    buf = buf.subarray(first + 1);              // them (else they bit-decode into phantom reads -
+    mdio._synced = true;                        // MDIO has no CRC to reject a mis-locked frame).
+  }
+  const last = buf.lastIndexOf(0xFF);
+  if (last < 0) { mdio._leftover = buf; return; }
+  const seg = buf.subarray(0, last + 1); mdio._leftover = buf.subarray(last + 1);
+  const { records, losses } = MDIO.recordsFromBinary(seg, 2);
+  if (losses) {                                 // a 0xFD discontinuity: count it AND drop any half-
+    mdio.loss += losses;                        // stitched burst, so a continued fragment whose
+    mdio._joiner = new MDIO.BurstJoiner();      // terminal was lost can't glue onto the next frame.
+  }
+  for (const rec of records) {
+    const lb = mdio._joiner.feed(rec);          // stitch FLAG_CONTINUED records into one logical burst:
+    if (!lb) continue;                          // a frame cut at BURST_MAX would otherwise decode as
+                                                // two halves -> phantom MMD reads at the split point.
+    if (lb.onset_us) { const r = MDIO.onsetMdcKHz(lb.onset_us); if (r) mdio.clk = r; }
+    if (lb.flags & (MDIO.FLAG_OVF_PIOC | MDIO.FLAG_OVF_RAM)) mdio.loss++;  // bytes dropped mid-capture:
+                                                // mark as loss, keep what decoded (never discard a burst).
+    for (const fr of MDIO.decodeBits(MDIO.bytesToBits(lb.payload))) {
+      mdio.frames++; mdio.win.push(performance.now());
+      const [text, ev] = mdio.folder.feed(fr); if (ev) mdioOnEvent(ev);
+    }
+  }
+}
+function mdioIntake(bytes) { sniffMeta(bytes); mdioFeed(bytes); }   // demo + serial both route here
+function mdioFmtRate(e) { const s = e.dt.slice().sort((a, b) => a - b); const med = s.length ? s[s.length >> 1] : 0; return med > 0 ? (1000 / med) : 0; }
+function rebuildMdio(now) {
+  const rows = [...mdio.regs.values()].sort((a, b) => a.phy - b.phy || a.target.localeCompare(b.target));
+  const frag = document.createDocumentFragment();
+  for (const e of rows) {
+    const age = now - e.lastT, s = e.dt.slice().sort((x, y) => x - y), per = s.length ? s[s.length >> 1] : 0;
+    const stale = age > Math.max(800, 4 * (per || 300)), act = age < 260, rate = mdioFmtRate(e);
+    const chg = e.changedAt && (now - e.changedAt) < 1100;
+    const bg = chg ? `rgba(242,185,80,${((1 - (now - e.changedAt) / 1100) * 0.5).toFixed(3)})` : 'transparent';
+    const tr = document.createElement('tr');
+    tr.className = (e.isNew ? 'fresh ' : '') + (stale ? 'stale' : ''); e.isNew = false;
+    tr.innerHTML =
+      `<td class="c-phy"><span class="led${act && !stale ? ' act' : ''}"></span>PHY${e.phy}</td>` +
+      `<td class="c-tgt${e.mmd ? ' mmd' : ''}">${e.target}</td>` +
+      `<td class="c-op ${e.op === MDIO.OP_R ? 'r' : 'w'}">${e.op === MDIO.OP_R ? 'READ' : 'WRITE'}</td>` +
+      `<td class="c-data" style="background:${bg}">0x${MDIO.hex4(e.data)}</td>` +
+      `<td class="c-cnt">${e.count}</td>` +
+      `<td class="c-rate">${rate >= 1 ? rate.toFixed(0) : rate.toFixed(1)} Hz</td>`;
+    frag.appendChild(tr);
+  }
+  $('mdio-grid').replaceChildren(frag);
+}
+
+// ---- MDIO demo: synthesize phylib-style polling, framed as wire=2 ----
+function mdioBitsOf(v, n) { const b = []; for (let k = n - 1; k >= 0; k--) b.push((v >> k) & 1); return b; }
+function mdioFrameBits(op, phy, reg, ta, data) {
+  return [...Array(32).fill(1), ...mdioBitsOf(0b01, 2), ...mdioBitsOf(op, 2), ...mdioBitsOf(phy, 5), ...mdioBitsOf(reg, 5), ...mdioBitsOf(ta, 2), ...mdioBitsOf(data, 16)];
+}
+function mdioPackBits(bits) { while (bits.length % 8) bits.push(1); const out = []; for (let i = 0; i < bits.length; i += 8) { let v = 0; for (let k = 0; k < 8; k++) v = (v << 1) | bits[i + k]; out.push(v); } return out; }
+function mdioBuildRecord(payload) {                          // wire=2: COBS-0xFF + 0xFF boundary
+  const buf = [0x01, 0xE8, 0x03, 0, 0, 0xC8, 0, 38, 0, 0, payload.length & 255, (payload.length >> 8) & 255];
+  for (const b of payload) buf.push(b);                      // hdr: t=1000 dur=200 onset=38us(~1473kHz) flags=0
+  return [...COBS.cobsFfEncode(Uint8Array.from(buf)), 0xFF];
+}
+function mdioMetaSeg(txt) { const o = [0xFE]; for (const c of txt) o.push(c.charCodeAt(0)); o.push(0xFE, 0xFF); return Uint8Array.from(o); }
+function mdioMmdRead(phy, dev, addr, data, postInc) {
+  const R = MDIO.OP_R, W = MDIO.OP_W;
+  return [].concat(mdioFrameBits(W, phy, 13, 0x10, (0b00 << 14) | dev), mdioFrameBits(W, phy, 14, 0x10, addr),
+    mdioFrameBits(W, phy, 13, 0x10, ((postInc ? 0b10 : 0b01) << 14) | dev), mdioFrameBits(R, phy, 14, 0x00, data));
+}
+function mdioDemoCycle(t) {
+  const R = MDIO.OP_R;
+  let bits = [];
+  bits = bits.concat(mdioFrameBits(R, 0, 1, 0x00, 0x796D));                      // C22 status (static)
+  bits = bits.concat(mdioFrameBits(R, 0, 16, 0x00, (t & 4) ? 0x00C1 : 0x0041));  // vendor C22 (toggles)
+  bits = bits.concat(mdioMmdRead(0, 7, 0x0202, (t % 3 === 0) ? 0x8000 : 0x1801, false)); // AN status (changes)
+  bits = bits.concat(mdioMmdRead(0, 31, 0x060C, t & 0xFFFF, true));              // vendor counter (post-inc)
+  bits = bits.concat(mdioFrameBits(R, 0, 14, 0x00, 0x1A2B));                     // post-inc 2nd read (static)
+  bits = bits.concat(mdioMmdRead(0, 31, 0x012B, 0xC003, false));                 // vendor config (static)
+  bits.push(...Array(32).fill(1));
+  return Uint8Array.from(mdioBuildRecord(mdioPackBits(bits)));
+}
+
+// ============================================================================
+//  Device mode (rle/clocked) — reconciliation: optimistic + lock + resync on
+//  [MODE] heartbeat + timeout→revert. (Spec: WIRE_ENVELOPE_SPEC.md §Réconciliation.)
+// ============================================================================
+const MODE_TIMEOUT_MS = 2200;
+const modeS = { ui: 'rle', device: 'rle', pending: false, target: null, timeoutAt: 0, lastHb: 0 };
+function modeForProto(p) { return p === 'mdio' ? 'clocked' : 'rle'; }
+function protoDefaultForMode(m) { return m === 'clocked' ? 'mdio' : 'can'; }
+
+async function sendModeCommand(mode) {                        // device knows MODES only, not protocols
+  if (!state.port || !state.port.writable) return;            // demo / offline: optimistic only
+  try {
+    const w = state.port.writable.getWriter();
+    await w.write(new TextEncoder().encode(`!mode ${mode}\n`));
+    w.releaseLock();
+  } catch (e) { /* writer busy / port closing */ }
+}
+function modeFlip(target) {                                   // cross-mode: optimistic UI + lock + cmd
+  if (modeS.pending || target === modeS.ui) { renderMode(); return; }
+  modeS.target = target; modeS.ui = target; modeS.pending = true;
+  modeS.timeoutAt = performance.now() + MODE_TIMEOUT_MS;
+  sendModeCommand(target);
+  renderMode();
+}
+function onModeMarker(m) {                                    // every [MODE m] (confirm OR heartbeat)
+  if (m !== 'rle' && m !== 'clocked') return;
+  modeS.device = m; modeS.lastHb = performance.now();
+  if (modeS.pending) { if (m === modeS.target) { modeS.pending = false; modeS.timeoutAt = 0; } }
+  else if (m !== modeS.ui) { modeS.ui = m; syncProtocolToMode(m); }   // device changed under us
+  renderMode();
+}
+function checkModeTimeout() {
+  if (modeS.pending && performance.now() >= modeS.timeoutAt) {
+    modeS.pending = false; modeS.ui = modeS.device; syncProtocolToMode(modeS.device);
+    renderMode();
+  }
+}
+setInterval(checkModeTimeout, 250);
+function renderMode() {
+  const g = m => (m === 'clocked' ? '⎍' : '∿');                // mode glyph, single source of truth
+  const label = m => (m === 'clocked' ? 'clocked' : 'timed');  // UI label only: the wire/host mode 'rle'
+                                                               // is shown to the user as 'timed'.
+  const pill = $('mode-pill'), txt = $('mode-pill-txt');
+  pill.className = 'pill ' + (modeS.pending ? 'pending' : (modeS.ui === modeS.device ? 'synced' : 'revert'));
+  txt.textContent = modeS.pending ? `→ ${g(modeS.target)} ${label(modeS.target)}…`
+                                  : (modeS.ui === modeS.device ? `${g(modeS.ui)} ${label(modeS.ui)}` : 'mismatch');
+}
+function syncProtocolToMode(m) {                              // align host view when device mode changes
+  if (modeForProto(state.protocol) !== m) setProtocol(protoDefaultForMode(m), true);
+}
+
+// ---- envelope [MODE] sniffer: boundary-aware, runs on every read so a mute
+// bus still confirms the mode. A metadata block (0xFE…0xFE) is only recognised in
+// SEGMENT-LEADING position (right after a 0xFF boundary): 0xFD/0xFE are ordinary
+// bytes inside a COBS-0xFF payload, so a captured stream must NOT be able to spoof
+// [MODE] from mid-payload. Mirrors the codec's demuxV2 dispatch contract. ----
+const metaSniff = { atStart: true, inMeta: false, buf: [] };
+function sniffMeta(bytes) {
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === 0xFF) { metaSniff.atStart = true; metaSniff.inMeta = false; metaSniff.buf = []; continue; }
+    if (metaSniff.atStart) {                       // first byte of a fresh segment decides its kind
+      metaSniff.atStart = false;
+      metaSniff.inMeta = (b === 0xFE);             // leading 0xFE => metadata candidate; else a record, ignored
+      metaSniff.buf = [];
+      continue;
+    }
+    if (!metaSniff.inMeta) continue;               // inside a record segment: ignore until next 0xFF
+    if (b === 0xFE) {                              // closing 0xFE: a complete 0xFE…0xFE block
+      const s = metaSniff.buf; metaSniff.inMeta = false;
+      let txt = '', okc = true;
+      for (const c of s) { if (c < 0x20 || c > 0x7E) { okc = false; break; } txt += String.fromCharCode(c); }
+      if (okc && txt && /^\[MODE\b/.test(txt)) handleMeta(txt);
+    } else {
+      metaSniff.buf.push(b);
+      if (metaSniff.buf.length > 80) metaSniff.inMeta = false;   // runaway guard
+    }
+  }
+}
+function handleMeta(txt) {
+  const meta = MDIO.parseMeta(txt);
+  if (meta.tag === 'MODE' && meta.mode) onModeMarker(meta.mode);
+}
+
+const elDmxGrid = $('dmx-grid');
+function rebuildDmx(now) {
+  const nchan = dmx.explen ? dmx.explen - 1 : (dmx.nslots || 0);
+  if (nchan <= 0) { if (elDmxGrid.childElementCount) elDmxGrid.replaceChildren(); return; }
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < nchan && i < 512; i++) {
+    const v = dmx.chans[i] | 0;
+    const pct = (v / 255 * 100).toFixed(1);
+    const since = now - (dmx.changed[i] || 0);
+    const chg = dmx.changed[i] && since < 1000;
+    const light = 14 + (v / 255) * 34;                       // brighter fill at higher level
+    const cell = document.createElement('div');
+    cell.className = 'ch' + (v > 0 ? ' on' : '') + (chg ? ' chg' : '');
+    cell.innerHTML = `<div class="fill" style="width:${pct}%;background:hsl(168 58% ${light.toFixed(0)}%)"></div>` +
+      `<span class="num">${i + 1}</span><span class="val">${v}</span>`;
+    frag.appendChild(cell);
+  }
+  elDmxGrid.replaceChildren(frag);
+}
+
+// ---- DMX demo: synth a 48-channel universe (counter + DEAD.. signature + chase + sine) ----
+const DMX_UNIVERSE = 48;
+function dmxDemoPacket(t) {
+  const ch = new Array(DMX_UNIVERSE).fill(0);
+  ch[0] = t & 0xFF;                                          // ch1 counter
+  const sig = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA]; for (let i = 0; i < 7; i++) ch[1 + i] = sig[i];  // ch2-8 static
+  for (let i = 0; i < 8; i++) ch[8 + i] = (i === (t % 8)) ? 255 : 0;   // ch9-16 chase
+  ch[16] = Math.round(127 + 120 * Math.sin(t / 10));         // ch17 sine
+  ch[17] = 255 - ch[16];                                     // ch18 inverse
+  ch[18] = (t * 4) & 0xFF;                                    // ch19 fast ramp
+  return [0x00, ...ch];
+}
+function encodePacketJS(slots, ui, c) {                       // -> run-lengths (ticks)
+  let bits = new Array(8).fill(1).concat(new Array(24).fill(0)).concat(new Array(4).fill(1));   // idle, BREAK, MAB
+  for (const b of slots) { bits.push(0); for (let k = 0; k < 8; k++) bits.push((b >> k) & 1); bits.push(1, 1); }
+  bits = bits.concat(new Array(8).fill(1));
+  const runs = []; let i = 0;
+  while (i < bits.length) { let j = i; while (j < bits.length && bits[j] === bits[i]) j++; runs.push((j - i) * ui + c); i = j; }
+  return runs;
+}
+function runsToWireJS(runs) {                                 // runs -> continuation wire, 0xFF wrapped
+  const out = [0xFF];
+  for (const r of runs) { let t = Math.round(r); if (t < 1) t = 1; while (t >= 128) { out.push(0x80); t -= 128; } out.push(t & 0x7F); }
+  out.push(0xFF);
+  return out;
+}
+
+// ============================================================================
+//  Protocol switch
+// ============================================================================
+function resetDmx() {
+  dmxProc.reset();
+  Object.assign(dmx, { packets: 0, rejected: 0, rejectStreak: 0, loss: 0, nslots: 0, startCode: null, explen: null, lenseen: [], win: [], sparkHist: [], lastT: 0 });
+  dmx.chans.fill(0); dmx.changed.fill(0);
+  elDmxGrid.replaceChildren();
+}
+function resetActive() {
+  state.lastDecodeT = performance.now(); state._prevCount = -1;   // grace period for the no-signal detector
+  if (state.protocol === 'mdio') resetMdio(); else if (state.protocol === 'dmx') resetDmx(); else resetCan();
+}
+
+// noCmd = called from a device-driven resync (don't re-issue a !mode command).
+function setProtocol(p, noCmd) {
+  if (state.protocol === p) return;
+  if (state.demoTimer) stopDemo();
+  state.protocol = p;
+  for (const x of $('proto-seg').children) x.classList.toggle('active', x.dataset.proto === p);
+  const label = p === 'can' ? 'CAN' : (p === 'dmx' ? 'DMX512' : 'MDIO');
+  $('brand-sub').textContent = label + ' sniffer · CH32X035';
+  $('health-can').style.display  = p === 'can'  ? 'flex' : 'none';
+  $('health-dmx').style.display  = p === 'dmx'  ? 'flex' : 'none';
+  $('health-mdio').style.display = p === 'mdio' ? 'flex' : 'none';
+  $('view-seg').style.display = p === 'can' ? 'flex' : 'none';
+  $('grid-wrap').style.display  = (p === 'can' && state.view === 'grid')  ? 'block' : 'none';
+  $('trace-wrap').style.display = (p === 'can' && state.view === 'trace') ? 'block' : 'none';
+  $('dmx-wrap').style.display  = p === 'dmx'  ? 'block' : 'none';
+  $('mdio-wrap').style.display = p === 'mdio' ? 'block' : 'none';
+  resetActive();
+  // the protocol selector drives the device mode: cross-mode sends !mode + reconciles,
+  // same-mode (CAN<->DMX) is an instant host-side switch (no command, no lock).
+  const target = modeForProto(p);
+  if (!noCmd && target !== modeS.ui && !modeS.pending) modeFlip(target);
+  else { if (!modeS.pending) modeS.ui = target; renderMode(); }
+  tick();
+}
+
+// ============================================================================
+//  Wire-up
+// ============================================================================
+$('btn-connect').onclick = () => { if (state.port) disconnect(); else connect(); };
+$('btn-demo').onclick = startDemo;
+$('btn-record').onclick = toggleRecord;
+$('btn-export').onclick = exportBin;
+$('btn-clear').onclick = clearAll;
+
+$('proto-seg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  setProtocol(b.dataset.proto);
+});
+
+// the protocol selector is the single mode control (MDIO -> clocked, CAN/DMX -> rle);
+// #mode-pill is now a read-only badge of the active mode + reconciliation state.
+renderMode();
+
+$('view-seg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.view = b.dataset.view;
+  for (const x of $('view-seg').children) x.classList.toggle('active', x === b);
+  $('grid-wrap').style.display = state.view === 'grid' ? 'block' : 'none';
+  elTrace.style.display = state.view === 'trace' ? 'block' : 'none';
+  tick();
+});
+
+document.querySelectorAll('thead th[data-sort]').forEach(th => {
+  th.onclick = () => {
+    const k = th.dataset.sort;
+    if (state.sortKey === k) state.sortDir *= -1; else { state.sortKey = k; state.sortDir = (k === 'id') ? 1 : -1; }
+    document.querySelectorAll('thead th .arrow').forEach(a => a.remove());
+    const ar = document.createElement('span'); ar.className = 'arrow'; ar.textContent = state.sortDir > 0 ? ' ▲' : ' ▼';
+    th.appendChild(ar);
+    state.dirty = true; tick();
+  };
+});
+
+if (!navigator.serial) { $('nosupport').style.display = 'block'; $('btn-connect').disabled = true; }
+</script>
+</body>
+</html>

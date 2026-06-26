@@ -1,0 +1,12 @@
+.pio
+.vscode/
+
+compile_commands.json
+.DS_Store
+__pycache__/
+*.pyc
+
+# PIOC: vendor assembler binaries + intermediates (the generated *_inc.h IS committed)
+pioc/*.EXE
+pioc/*.BIN
+pioc/*.LST
