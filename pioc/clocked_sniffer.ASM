@@ -1,5 +1,5 @@
 ;==============================================================================
-; pioc_capture_ring.ASM - DMA-style byte FIFO into the host-shared data regs.
+; clocked_sniffer.ASM - DMA-style clocked byte FIFO into the host-shared data regs.
 ;
 ; The eMCU never stops: it packs 8 captured bits into one byte and stores it into
 ; a 16-slot ring (DATA_REG0..15) using the auto-incrementing indirect port

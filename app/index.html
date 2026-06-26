@@ -185,7 +185,7 @@
 <div id="nosupport">⚠ This browser has no Web Serial API. Use Chrome, Edge or Opera (desktop) over <code>https://</code> or <code>file://</code>.</div>
 
 <div id="bar">
-  <div id="brand"><span class="dot"></span><span>Tapioca</span><span class="sub" id="brand-sub">CAN sniffer · CH32X035</span></div>
+  <div id="brand"><span class="dot"></span><span>Tapioca</span><span class="sub" id="brand-sub">multi-bus sniffer · CH32X035</span></div>
   <div class="seg" id="proto-seg">
     <button data-proto="can" class="active">CAN</button>
     <button data-proto="dmx">DMX</button>
@@ -767,8 +767,8 @@ function frameBoundaryRuns(runs) {       // MIN-based (NOT percentile): max(56, 
 }
 
 // ============================================================================
-//  Streaming processor — mirrors can_tui.py reader: binary -> runs -> frames,
-//  with the 3-tier cached calibration, load-shed, sync gating and 0xFD resync.
+//  CAN streaming processor: binary -> runs -> frames, with the 3-tier
+//  cached calibration, load-shed, sync gating and 0xFD resync.
 // ============================================================================
 const FLUSH_AT   = 64;        // accumulate this many runs before splitting
 const MAX_WORK   = 600;       // runs processed per flush (UI thread can't block)
@@ -955,7 +955,7 @@ const TRACE_MAX = 600;
 const $ = id => document.getElementById(id);
 const elGrid = $('grid'), elTrace = $('trace-wrap'), elEmpty = $('empty');
 
-// ---- frame intake (mirrors can_tui add()/add_frame clean-display policy) ----
+// ---- CAN frame intake: clean-display policy, only good frames update the model ----
 function onFrame(frame, ui, drop) {
   const now = performance.now();
   state.frames++;
@@ -1298,7 +1298,7 @@ function clearAll() { resetActive(); }
 const BREAK_BITS = 16, IDLE_SEP_BITS = 4;
 function bisectRight(a, x) { let lo = 0, hi = a.length; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= x) lo = m + 1; else hi = m; } return lo; }
 
-function assignLevels(runs, idleHigh) {            // absolute level per run, re-anchor on '|'
+function assignLevels(runs, idleHigh) {            // absolute level per run, re-anchor on BOUNDARY_RUN
   const idle = idleHigh ? 1 : 0; const out = []; let lv = idle;
   for (const r of runs) { if (r >= BOUNDARY_RUN) { out.push(idle); lv = idle ^ 1; } else { out.push(lv); lv ^= 1; } }
   return out;
@@ -1336,7 +1336,7 @@ function firstBreakEnd(tl, pStart, pEnd) {         // end of the first BREAK LOW
   while (i < tl.segs.length) { const [s, e, lv] = tl.segs[i]; if (s >= pEnd) break; if (lv === 0 && (e - s) >= BREAK_BITS) return e; i++; }
   return null;
 }
-function decodeTimeline(tl) {                      // one frame per firmware '|', else split on BREAK
+function decodeTimeline(tl) {                      // one frame per firmware idle boundary, else split on BREAK
   let regions;
   if (tl.bounds.length) { const edges = [...tl.bounds, tl.end]; regions = []; for (let k = 0; k < edges.length - 1; k++) regions.push([edges[k], edges[k + 1]]); }
   else { const brk = []; for (let i = 0; i < tl.segs.length; i++) { const [s, e, lv] = tl.segs[i]; if (lv === 0 && (e - s) >= BREAK_BITS) brk.push(s); } regions = []; for (let k = 0; k < brk.length; k++) regions.push([brk[k], k + 1 < brk.length ? brk[k + 1] : tl.end]); }
@@ -1374,14 +1374,14 @@ function captureToRunsJS(data) {                   // binary capture -> runs (po
   segs.push(cur);
   const runs = []; let acc = 0;
   for (let si = 0; si < segs.length; si++) {
-    if (si) { if (acc) { runs.push(acc); acc = 0; } runs.push(BOUNDARY_RUN); }   // PIPE = hard cut
+    if (si) { if (acc) { runs.push(acc); acc = 0; } runs.push(BOUNDARY_RUN); }   // firmware idle boundary = hard cut
     for (const b of segs[si]) { if (b >= 128) acc += 128; else { runs.push(acc + b); acc = 0; } }
   }
   return runs;
 }
 
 // DMX stream processor — batch on 0xFF boundaries, cache calibration, recalibrate
-// when a batch decodes nothing plausible (mirrors dmx_tui.py reader).
+// when a batch decodes nothing plausible.
 class DmxProc {
   constructor(onPacket) { this.onPacket = onPacket; this.reset(); }
   reset() { this.acc = []; this.cal = null; }
@@ -1415,7 +1415,7 @@ const dmx = {
 };
 function modeOf(arr) { const m = new Map(); let bk = arr[0], bn = 0; for (const v of arr) { const c = (m.get(v) || 0) + 1; m.set(v, c); if (c > bn) { bn = c; bk = v; } } return bk; }
 
-// intake (mirrors dmx_tui add_packet): lock universe size on 0x00 frames only,
+// intake: lock universe size on 0x00 frames only,
 // self-heal a wrong lock after 32 consecutive rejects, never show garbage.
 function onDmxPacket(p) {
   const now = performance.now();

@@ -41,11 +41,11 @@ import can_rle_decode as C
 # data = START + 8 zero data bits = 9 (a 0x00 slot); BREAK is >= ~22. So a LOW run
 # of >= BREAK_BITS is unambiguously a BREAK, never a data byte.
 BREAK_BITS = 16
-IDLE_SEP_BITS = 4          # nominal HIGH gap to represent a BOUNDARY_RUN '|' on the timeline
+IDLE_SEP_BITS = 4          # nominal HIGH gap to represent a BOUNDARY_RUN on the timeline
 
 
 def assign_levels(runs, idle_high=True):
-    """Absolute level per run: re-anchor on every BOUNDARY '|' (idle MARK = HIGH, the
+    """Absolute level per run: re-anchor on every BOUNDARY_RUN (idle MARK = HIGH, the
        run after it is the BREAK), and alternate in between. MARK/idle = HIGH;
        idle_high=False is the inverted-wiring fallback.
 
@@ -69,12 +69,12 @@ class _Timeline:
     """Runs laid end-to-end on a fractional-bit axis: each run contributes
        run/UI_level bits (NO rounding), so absolute bit positions are exact and a
        run that is 9.4 bits long stays 9.4 - it never snaps to 9 or 10. A
-       BOUNDARY_RUN '|' becomes a short HIGH idle separator. Sampling/edge queries
+       BOUNDARY_RUN becomes a short HIGH idle separator. Sampling/edge queries
        are O(log n) via bisect; the UART sampler reads bit centres off this axis."""
 
     def __init__(self, runs, levels, ui_lo, ui_hi):
         self.segs = []                           # (start_bit, end_bit, level)
-        self.bounds = []                         # bit positions of BOUNDARY '|' idles
+        self.bounds = []                         # bit positions of BOUNDARY_RUN idles
         pos = 0.0
         for r, lv in zip(runs, levels):
             if r >= C.BOUNDARY_RUN:

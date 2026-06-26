@@ -1,15 +1,16 @@
 ;==============================================================================
-; can_rle_gen_ring30.ASM - 30-slot experimental variant of can_rle_gen.ASM.
+; rle_sniffer.ASM - passive run-length capture engine.
 ;
-; The wire protocol and every PIOC hot path are identical to can_rle_gen.ASM.
-; Only the shared-data layout changes:
-;   DATA_REG0 = CNT, DATA_REG1 = HEAD, DATA_REG2..31 = 30-slot FIFO.
+; The eMCU watches IO1 (PC19), measures how long the logic level stays HIGH or
+; LOW, and streams run bytes into a 30-slot FIFO in the host-shared data regs:
+;   DATA_REG0 = CNT, DATA_REG1 = HEAD, DATA_REG2..31 = FIFO slots.
 ;
-; Starting at DATA_REG2 lets the indirect pointer reach 0x40 after slot 31.
-; BTSC bit6 detects that wrap in exactly the same two instructions as the old
-; 16-slot bit4 wrap, so this variant must not reduce the capture blind margin.
-; The CPU side deliberately uses a separate physical cursor: 30 is not a power
-; of two and HEAD's 8-bit wrap cannot be masked into a slot index.
+; A run is encoded as zero or more 0x80 continuation bytes (+128 ticks, same
+; level), followed by one terminal byte <0x80 that ends the run and flips level.
+; Starting the FIFO at DATA_REG2 lets the indirect pointer reach 0x40 after
+; slot 31; BTSC bit6 detects that wrap without needing modulo arithmetic in the
+; hot path. The CPU side deliberately uses a separate physical cursor: 30 is
+; not a power of two and HEAD's 8-bit wrap cannot be masked into a slot index.
 ;==============================================================================
 
 INCLUDE             PIOC_INC.ASM

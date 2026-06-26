@@ -145,7 +145,7 @@ BOUNDARY = 56   # floor: between 5-bit max in-frame run and ~11-bit gap @ UI~6
 
 def split_frames(allbytes, bound):
     """Cut the reconstructed run list into per-frame lists: a run >= `bound` is a long
-       recessive gap (or a BOUNDARY_RUN sentinel from an idle '|' / loss marker)."""
+       recessive gap (or a BOUNDARY_RUN sentinel from an idle boundary / loss marker)."""
     frames, cur = [], []
     for b in allbytes:
         if b >= bound:                   # frame boundary: end the current frame
@@ -159,8 +159,8 @@ def split_frames(allbytes, bound):
     return frames
 
 
-# ---- scheme C (cap-continuation): rle_sniffer blob ---------------------------
-PIPE = -1                # firmware idle boundary (0xFF on the wire): a hard frame cut
+# ---- cap-continuation wire format: rle_sniffer blob --------------------------
+IDLE_BOUNDARY = -1       # firmware idle boundary (0xFF on the wire): a hard frame cut
 BOUNDARY_RUN = 1 << 30   # sentinel run length: always >= any frame_boundary threshold
 
 
@@ -169,13 +169,13 @@ def reconstruct_continuation(items):
        (each = +128 ticks, same level) ended by a TERMINAL byte <128 (run ends,
        level flips). Sum them into true run lengths. This is what makes the encoding
        bitrate-agnostic: a run of any duration survives as caps+remainder, so no
-       fixed tick-cap floor. `items` may contain PIPE sentinels (the firmware's idle
-       '|' marker): each flushes the in-progress run and forces a frame boundary.
+       fixed tick-cap floor. `items` may contain IDLE_BOUNDARY sentinels (the firmware's 0xFF idle
+       boundary): each flushes the in-progress run and forces a frame boundary.
        Returns the reconstructed run-lengths (may exceed 255). A trailing
        unterminated continuation (capture cut mid-idle) is dropped."""
     runs, acc = [], 0
     for b in items:
-        if b == PIPE:                       # firmware idle marker -> hard boundary
+        if b == IDLE_BOUNDARY:              # firmware idle boundary -> hard frame cut
             if acc:
                 runs.append(acc); acc = 0   # flush whatever idle ticks we summed
             runs.append(BOUNDARY_RUN)       # a run guaranteed above any threshold
@@ -278,7 +278,7 @@ def decode_frame_runs(counts):
     """Decode one frame's runs into (frame_dict, ui, dropped) or None.
 
     The first run may be the idle TAIL: the recessive leftover the firmware emits
-    between the long-idle '|' and the SOF. It leaks into the frame when it's below
+    between the firmware idle boundary and the SOF. It leaks into the frame when it's below
     the boundary threshold, flipping the level parity (-> extended-ID / bad CRC) or,
     when ~0 ticks, wrecking the per-level UI fit. Try the runs as-is AND with the
     leading run dropped; keep the parse that yields a valid frame (prefer no drop)."""
@@ -330,8 +330,8 @@ def build_frame_bits(can_id, data):
 
 
 def frame_to_bytes_continuation(frame_bits, ui_dom=30, ui_rec=31, c_dom=1, c_rec=2):
-    """Emulate the rle_sniffer (scheme C) byte stream: a run of t ticks is emitted
-       as floor(t/128) continuation bytes (=128) then a terminal byte (t mod 128).
+    """Emulate the rle_sniffer cap-continuation byte stream: a run of t ticks
+       is emitted as floor(t/128) continuation bytes (=128) then a terminal byte (t mod 128).
        Default UI~30 (low bitrate) so in-frame runs EXCEED 128 ticks - the exact
        case the fixed cap broke and continuation must recover."""
     out = []
@@ -382,13 +382,13 @@ def selftest():
     okj = len(jres) == 2 and good(jres[0], dataA) and good(jres[1], dataB)
     print("[%s] with +-1 tick jitter on every run" % ("ok" if okj else "FAIL"))
 
-    # the firmware idle boundary (PIPE; 0xFF on the wire) must force a cut WITHOUT summing
+    # the firmware idle boundary (0xFF on the wire) must force a cut WITHOUT summing
     # the runs across it - even when there is no long run to separate the two groups.
-    pitems = [5, 6] * 4 + [PIPE] + [7, 8] * 4
+    pitems = [5, 6] * 4 + [IDLE_BOUNDARY] + [7, 8] * 4
     pruns = reconstruct_continuation(pitems)
     pframes = split_frames(pruns, frame_boundary_runs(pruns))
     okp = (pframes == [[5, 6, 5, 6, 5, 6, 5, 6], [7, 8, 7, 8, 7, 8, 7, 8]])
-    print("[%s] '|' idle marker (PIPE) forces a clean boundary, no cross-sum"
+    print("[%s] 0xFF idle boundary forces a clean cut, no cross-sum"
           % ("ok" if okp else "FAIL"))
 
     # a stray 0-tick run (publish-blind-window glitch on real silicon) must not
@@ -421,7 +421,7 @@ def selftest():
 
 # Binary wire sentinels (native firmware format). The cap-continuation only ever emits
 # run-bytes 0x00..0x80, so 0x81..0xFF are free sentinels - no escaping needed.
-BIN_BOUNDARY = 0xFF     # frame boundary (the old '|')
+BIN_BOUNDARY = 0xFF     # firmware idle boundary / hard frame cut
 BIN_DIAG     = 0xFE     # diag block delimiter: 0xFE <ascii> 0xFE
 BIN_LOSS     = 0xFD     # capture-loss marker: device dropped data (RAM ring overflow) here
 
@@ -437,7 +437,7 @@ def capture_to_runs(data):
        run-bytes 0x00..0x80 ; 0xFF = boundary ; 0xFD = capture-loss (forced boundary,
        data was dropped - don't merge across it) ; 0xFE <ascii> 0xFE = diag block
        (skipped) ; 0x81..0xFC = reserved (ignored). Cap-continuations are summed and a
-       PIPE between segments becomes a BOUNDARY_RUN. No protocol framing here - callers
+       the boundary between segments becomes a BOUNDARY_RUN. No protocol framing here - callers
        segment the returned runs themselves (split_frames)."""
     segs, cur = [], []
     i, n = 0, len(data)
@@ -459,7 +459,7 @@ def capture_to_runs(data):
     items = []
     for si, sb in enumerate(segs):
         if si:
-            items.append(PIPE)              # boundary between segments = hard cut
+            items.append(IDLE_BOUNDARY)     # boundary between segments = hard cut
         items += sb
     return reconstruct_continuation(items)
 
@@ -552,9 +552,9 @@ def decode_stream(data):
 
 # ============================================================================
 #  --live : headless realtime reader (frames -> stdout). The reader() below is
-#  ported VERBATIM from the validated can_tui.py (O_NONBLOCK+select CDC reader,
-#  incremental run reconstruction, 3-tier decode with cal cache, load-shed). The
-#  only change is the SINK: _LiveSink prints OK frames to stdout (one per line:
+#  Realtime reader: O_NONBLOCK+select CDC input, incremental run reconstruction,
+#  3-tier decode with calibration cache and load-shed. The sink prints OK frames
+#  to stdout (one per line:
 #  "0x<id> <dlc> <hex bytes>"), health (loss/ovf/shed) to stderr - so stdout
 #  stays clean and scriptable. Bench-validated path; re-test on the bench.
 # ============================================================================

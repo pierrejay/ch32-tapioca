@@ -81,14 +81,14 @@ public:
     //    exactly one completion is pending per call - no missed-event counting.
     //  - It's the tx_ CONSUMER (tail_); service() is the sole PRODUCER (head_). Interleaving
     //    pump() inside service()'s fill loop is safe: disjoint cursors, SPSC.
-    //  - No new interrupt -> the 100kHz capture ISR is never perturbed (the hard constraint).
+    //  - No new interrupt -> the TIM3 RLE drain ISR is never perturbed (the hard constraint).
     //
     // Non-EP3-IN completions fall back to the full onIrq(); see the .cpp for the rare race
     // that fallback can drop and why it self-heals. 
     void pump() __HIGHCODE;
 
-    // CDC line coding: the bridge reads this when lineCodingChanged() to
-    // reconfigure the real UART. The flag is sticky until read. 
+    // CDC line coding: exposed for host-control experiments; the capture firmware
+    // currently only tracks whether the host changed it. The flag is sticky until read. 
     const LineCoding& lineCoding() const { return lc_; }
     bool lineCodingChanged()
     {
