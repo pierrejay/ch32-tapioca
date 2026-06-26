@@ -1,10 +1,9 @@
-// main.cpp - CH32X035 firmware base (generic rle / clocked sniffer).
+// main.cpp - Tapioca firmware base (generic rle / clocked sniffer for CH32X035).
 //
 // Keeps the USB-CDC device (UsbCdc) alive as the byte-stream link, plus an LED
-// heartbeat. The old USART2<->USB UartBridge was removed, freeing USART2 for the
-// debug console (-D DEBUG=2 -> PA2). Runtime mode is picked at build time:
-//   - RUN_SNIFFER : both datapaths + runtime !mode switch (the product)
-//   - RUN_CLOCKED_SNIFFER    : clocked datapath standalone
+// heartbeat. Main build flags:
+//   - RUN_SNIFFER         : both datapaths + runtime !mode switch (the product)
+//   - RUN_CLOCKED_SNIFFER : clocked datapath standalone
 //   - RUN_RLE_SNIFFER     : rle datapath standalone
 #include "ch32_sdk.hpp"
 #include "led_blinker.hpp"
@@ -12,25 +11,25 @@
 #include "usb_cdc.hpp"
 
 #if defined(RUN_CLOCKED_SNIFFER) || defined(RUN_SNIFFER)
-#include "clocked_sniffer.hpp"     // ClockedSniffer
+#include "clocked_sniffer.hpp"
 #endif
 
 #ifdef RUN_SNIFFER
-#include "rle_sniffer.hpp"         // RleSniffer too: both datapaths, runtime mode_ select
-#include "mode_command.hpp"        // ModeCmd::parse / CaptureMode
-#include "record_framer.hpp"       // RecordFramer::frameMeta / frameLoss for the switch seam
+#include "rle_sniffer.hpp"
+#include "mode_command.hpp"
+#include "record_framer.hpp"
 #endif
 
 #ifdef RUN_RLE_SNIFFER
-#include "rle_sniffer.hpp"         // RleSniffer
+#include "rle_sniffer.hpp"
 #endif
 
 #ifdef RUN_RLE_TICK_TEST
-#include "rle_sniffer.hpp"         // real rle blob + TIM3 drain, tapped raw by the bench
-#include "rle_tick_test.hpp"       // RleTickTest: constant-level cap timing -> integer cyc/tick
+#include "rle_sniffer.hpp"
+#include "rle_tick_test.hpp"
 #endif
 
-// Heartbeat LED: PB12. Clear of USB PC16/PC17, debug PA2 (DEBUG=2) and PIOC PC18/PC19.
+// Heartbeat LED
 #ifndef LED_GPIO_PORT
 #define LED_GPIO_PORT GPIOB
 #endif
@@ -47,9 +46,6 @@
 static constexpr uint32_t LED_FLASH_MS = 50;
 static constexpr uint32_t LED_PERIOD_MS = 1000;
 
-// File-scope so they live in .bss with static storage duration, but are
-// constructed trivially - all hardware init happens in init(), called from
-// main(), so there is no global-constructor ordering hazard. 
 static UsbCdc     g_usb;
 static LedBlinker g_led(LED_GPIO_PORT,
                         LED_GPIO_PIN,
@@ -57,15 +53,15 @@ static LedBlinker g_led(LED_GPIO_PORT,
                         LED_ACTIVE_HIGH != 0);
 
 #if defined(RUN_CLOCKED_SNIFFER) || defined(RUN_SNIFFER)
-static ClockedSniffer g_clocked(g_usb);   // drains the PIOC FIFO to USB each loop
+static ClockedSniffer g_clocked(g_usb);
 #endif
 
 #if defined(RUN_RLE_SNIFFER) || defined(RUN_SNIFFER) || defined(RUN_RLE_TICK_TEST)
-static RleSniffer  g_rle(g_usb);       // continuous rle passive tap -> USB
+static RleSniffer  g_rle(g_usb);
 #endif
 
 #ifdef RUN_RLE_TICK_TEST
-static RleTickTest g_tick(g_rle);      // bench: measure the blob's per-level tick cycles
+static RleTickTest g_tick(g_rle); // bench: measure the blob's per-level tick cycles
 #endif
 
 #ifdef RUN_SNIFFER
@@ -85,7 +81,7 @@ static ModeCmd::CaptureMode g_mode = ModeCmd::CaptureMode::Clocked;
 // so a periodic heartbeat can never tear an in-flight record/frame. The control plane
 // only writes the transport seam; the rest is the datapath's job. This keeps main.cpp
 // thin and the two modes symmetric. 
-static char     g_cmdLine[24];                        // RX line accumulator ("!mode clocked" + CRLF)
+static char     g_cmdLine[24];  // RX line accumulator ("!mode clocked" + CRLF)
 static uint16_t g_cmdLen = 0;
 
 // stop active -> hard seam -> start other. Runs OUT of capture (between service()
@@ -102,7 +98,7 @@ static void unifiedSwitchTo(ModeCmd::CaptureMode m)
     while (off < sizeof(seam) && guard < 100000) {
         uint32_t n = g_usb.write(seam + off, (uint32_t)(sizeof(seam) - off));
         off += n;
-        g_usb.tick(Time::millis());                   // drain toward the host between attempts
+        g_usb.tick(Time::millis()); // drain toward the host between attempts
         if (n == 0) ++guard; else guard = 0;
     }
     g_mode = m;
@@ -124,7 +120,7 @@ static void unifiedPollCommand()
         } else if (g_cmdLen < sizeof(g_cmdLine)) {
             g_cmdLine[g_cmdLen++] = (char)b;
         } else {
-            g_cmdLen = 0;                                   // over-long line -> drop, resync on next newline
+            g_cmdLen = 0; // over-long line -> drop, resync on next newline
         }
     }
 }
@@ -162,7 +158,7 @@ int main(void)
     // boot output isn't lost. Pump USB while waiting. 
     {
         uint32_t t0 = Time::millis();
-        while (Time::millis() - t0 < 4000) g_usb.tick(Time::millis());
+        while (Time::millis() - t0 < 2000) g_usb.tick(Time::millis());
     }
 
     printf("SystemClk:%u\r\n", (unsigned)SystemCoreClock);
@@ -177,7 +173,7 @@ int main(void)
 #endif
 
 #ifdef RUN_RLE_TICK_TEST
-    g_tick.begin(Time::millis());         // constant level on PA7 + real rle blob (TIM3 drain)
+    g_tick.begin(Time::millis());  // constant level on PA7 + real rle blob (TIM3 drain)
 #endif
 
 #ifdef RUN_SNIFFER
@@ -202,31 +198,30 @@ int main(void)
 #endif
 
 #ifdef RUN_CLOCKED_SNIFFER
-        g_clocked.service(now);               // drain ring -> USB; never blocks long
+        g_clocked.service(now); // drain ring -> USB; never blocks long
 #endif
 
 #ifdef RUN_RLE_SNIFFER
-        g_rle.service(now);                   // drain PIOC ring -> USB; never blocks
+        g_rle.service(now);     // drain PIOC ring -> USB; never blocks
 #ifdef DIAG
         g_rle.recordTiming(Time::micros() - _tsvc);  // us in service()
 #endif
 #endif
 
 #ifdef RUN_RLE_TICK_TEST
-        g_tick.service(now);                  // count caps on the held level, flip + report per phase
+        g_tick.service(now);   // count caps on the held level, flip + report per phase
 #endif
 
 #ifdef RUN_SNIFFER
-        // route to the active datapath only - never service both at once.
         if (g_mode == ModeCmd::CaptureMode::Rle) {
             g_rle.service(now);
 #ifdef DIAG
             g_rle.recordTiming(Time::micros() - _tsvc);
 #endif
         } else {
-            g_clocked.service(now);           // clocked: drain ring -> USB (now pump-driven)
+            g_clocked.service(now); // clocked: drain ring -> USB
         }
-        unifiedPollCommand();                 // host !mode -> stop/reconfig/start, out of capture
+        unifiedPollCommand();             // host !mode -> stop/reconfig/start, out of capture
 #endif
 
         if ((int32_t)(now - nextLedFlashMs) >= 0)
@@ -234,7 +229,7 @@ int main(void)
             g_led.blink(LED_FLASH_MS);
             nextLedFlashMs = now + LED_PERIOD_MS;
 #if !defined(RUN_CLOCKED_SNIFFER) && !defined(RUN_RLE_SNIFFER) && !defined(RUN_SNIFFER) && !defined(RUN_RLE_TICK_TEST)
-            printf("Blink.\r\n");             // heartbeat text would pollute the binary capture stream
+            printf("Blink.\r\n");  // heartbeat text would pollute the binary capture stream
 #endif
         }
 
