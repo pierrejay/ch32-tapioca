@@ -193,11 +193,19 @@ def frame_boundary_runs(runs):
        legitimately exceed 128 ticks at low bitrate; only the idle gap is the cut."""
     small = [r for r in runs if r > 0] or [BOUNDARY]
     c1 = min(small)
-    # 5 identical CAN bits are legal in-frame before a stuff bit. At 500 kbit/s
-    # they measured ~58/59 ticks in real captures while c1 (1-bit min) is ~9/10;
-    # 6*c1 is therefore too close and can split inside FF-heavy payloads. Keep
-    # the fixed 56-tick floor for 1 Mbit/s, but scale low rates above 5-bit runs.
+    # The min run is a 1-bit pulse, but jitter makes it read a touch SHORT, so 8*c1
+    # compensates that bias to land between the 5-bit max in-frame run and the EOF/IFS gap.
+    # COLD-START proxy only: bound_from_ui takes over once a real per-level UI is locked.
     return max(BOUNDARY, 8 * c1)
+
+
+def bound_from_ui(cal):
+    """Frame boundary from the LOCKED per-level UI (cal = (ui_l, _, ui_h, _)). The cut must sit
+       between the legal 5-bit max in-frame run and the >=10-bit (EOF 7 + IFS 3) inter-frame gap,
+       so 7*UI is the centre. Replaces frame_boundary_runs' 8*min proxy once a real UI is known:
+       the fit averages out the jitter that biased min, so it tracks the true bit length at any
+       rate with no empirical factor. (8*min ~= 8*0.87*UI ~= 7*UI - same value, cleaner origin.)"""
+    return max(BOUNDARY, round(3.5 * (cal[0] + cal[2])))     # 3.5*(ui_l+ui_h) = 7*UI_mean
 
 
 def fit_burst_ui(counts):
@@ -418,7 +426,15 @@ def selftest():
     print("[%s] baud from per-level UI: %.0f (dom %.0f / rec %.0f) for a 1 Mbit bus"
           % ("ok" if okb else "FAIL", mean, bd, br))
 
-    if not (okA and okB and okj and okp and okz and okt and okb):
+    # boundary from the locked UI: 7*UI must sit between the 5-bit in-frame run and the 10-bit
+    # EOF/IFS gap. 500 kbit/s (UI_dom 12.0 / UI_rec 10.67) -> ~79 ticks; 1 Mbit hits the 56 floor.
+    ui500 = (12.0, 0.0, 48.0 / 9.0 * 2, 0.0)
+    b500 = bound_from_ui(ui500)
+    okbd = (5 * ui500[0] < b500 < 10 * ui500[2]) and bound_from_ui((6.0, 0.0, 48.0 / 9.0, 0.0)) == BOUNDARY
+    print("[%s] frame boundary from locked UI: %d ticks @500k (between 5-bit run and EOF gap)"
+          % ("ok" if okbd else "FAIL", b500))
+
+    if not (okA and okB and okj and okp and okz and okt and okb and okbd):
         sys.exit(1)
     print("SELF-TEST PASSED")
 
@@ -469,9 +485,18 @@ def capture_to_runs(data):
 
 
 def parse_capture(data):
-    """Binary capture -> list of per-CAN-frame run lists (split on the EOF recessive run)."""
+    """Binary capture -> list of per-CAN-frame run lists (split on the EOF recessive run).
+       Bootstrap the boundary from 8*min, then - once a frame resolves a per-level UI - refine
+       it to 7*UI (the unbiased bit length) and re-split, mirroring the browser decoder."""
     runs = capture_to_runs(data)
-    return split_frames(runs, frame_boundary_runs(runs))
+    frames = split_frames(runs, frame_boundary_runs(runs))      # bootstrap split (8*min)
+    for fr in frames:                                           # first well-resolved frame -> lock UI
+        if len(fr) < 8:
+            continue
+        cal = fit_burst_ui(fr)
+        if cal[0] > 0 and cal[2] > 0:
+            return split_frames(runs, bound_from_ui(cal))       # refine + re-split at 7*UI
+    return frames
 
 
 # ---- absolute bitrate: the device tells us its tick time-base -----------------------
@@ -716,6 +741,7 @@ def reader(path, st):
         f, ui, drop = best
         if f.get("crc_ok"):
             cal[0] = D.fit_burst_ui(runs[drop:])  # lock / refresh the cal from a clean frame
+            bnd[0] = D.bound_from_ui(cal[0])      # re-derive the boundary from the locked UI
         add(f, ui)
 
     def flush(force=False):
@@ -729,10 +755,11 @@ def reader(path, st):
             n = len(runbuf) - MAX_BACKLOG
             del runbuf[:n]
             st.add_dropped(n)
-        # Boundary threshold is bus-rate-fixed -> derive ONCE then reuse (no per-flush
-        # sort). frame_boundary_runs = max(56, 8*min-run), the proven offline value.
+        # Boundary threshold: bootstrap from 8*min (no UI yet), then emit() refreshes it from
+        # the locked UI (bound_from_ui = 7*UI) so it tracks the true bit length, re-deriving on
+        # a live rate change instead of staying pinned to the first rate seen.
         if not bnd[0]:
-            bnd[0] = D.frame_boundary_runs(runbuf)
+            bnd[0] = D.bound_from_ui(cal[0]) if cal[0] else D.frame_boundary_runs(runbuf)
         bound = bnd[0]
         slow = [SLOW_BUDGET]
         cur, last = [], 0
