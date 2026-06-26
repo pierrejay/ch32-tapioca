@@ -760,14 +760,22 @@ function decodeFrameRuns(counts) {       // try as-is and with leading idle-tail
   return best;
 }
 
-function frameBoundaryRuns(runs) {       // max(56, 8*min): above legal 5-bit runs
+function frameBoundaryRuns(runs) {       // COLD-START proxy: max(56, 8*min), before any UI fit
   let mn = Infinity;
   for (const r of runs) if (r > 0 && r < mn) mn = r;
   if (mn === Infinity) mn = BOUNDARY;
-  // Real 500 kbit/s captures have legal 5-bit recessive runs around 58/59 ticks
-  // while 1-bit runs bottom out near 9/10 ticks. 6*min was too close and split
-  // inside FF-heavy payloads; 8*min stays below real EOF/IFS gaps.
+  // The min run is a 1-bit pulse, but jitter makes it read a touch SHORT, so 8*min
+  // compensates that bias to land between the 5-bit max in-frame run and the EOF/IFS gap.
+  // Used only until decode locks; boundFromUI then takes over with the real bit length.
   return Math.max(BOUNDARY, 8 * mn);
+}
+
+// Frame boundary from the LOCKED per-level UI fit (cal = [uiDom, _, uiRec, _]). The split must
+// sit between the legal 5-bit max in-frame run and the >=10-bit (EOF 7 + IFS 3) inter-frame gap,
+// so 7*UI is the centre. This replaces the 8*min proxy once we have cal: the fit averages out the
+// jitter that biased min, so the boundary tracks the true bit length at any rate, no magic factor.
+function boundFromUI(cal) {
+  return Math.max(BOUNDARY, Math.round(3.5 * (cal[0] + cal[2])));   // 3.5*(uiDom+uiRec) = 7*UI_mean
 }
 
 // ============================================================================
@@ -833,7 +841,7 @@ class StreamProc {
       this.runbuf.splice(0, drop); state.shed += drop;
     }
     const work = this.runbuf.length > MAX_WORK ? this.runbuf.slice(0, MAX_WORK) : this.runbuf;
-    if (!this.bound) this.bound = frameBoundaryRuns(work);
+    if (!this.bound) this.bound = this.cal ? boundFromUI(this.cal) : frameBoundaryRuns(work);
     const budget = { n: SLOW_BUDGET };
     let cur = [], last = 0;
     for (let i = 0; i < work.length; i++) {
@@ -874,7 +882,7 @@ class StreamProc {
     budget.n--;
     let best; try { best = decodeFrameRuns(runs); } catch (e) { best = null; }
     if (!best) { this.miss++; return; }
-    if (best.frame.crcOk) { this.cal = fitBurstUI(runs.slice(best.drop)); this.miss = 0; }   // refresh cal
+    if (best.frame.crcOk) { this.cal = fitBurstUI(runs.slice(best.drop)); this.bound = boundFromUI(this.cal); this.miss = 0; }   // refresh cal + UI-based boundary
     else this.miss++;
     this.onFrame(best.frame, best.ui, best.drop);
   }
@@ -1123,7 +1131,7 @@ function fmtBaud(hist) {
   const k = median(hist) / 1000;                                  // kbit/s
   let best = CAN_STD_K[0], err = Infinity;
   for (const s of CAN_STD_K) { const e = Math.abs(k - s) / s; if (e < err) { err = e; best = s; } }
-  const fmtK = v => v >= 1000 ? '1 Mbit/s' : `${v < 100 ? v.toFixed(1).replace(/\.0$/, '') : v.toFixed(0)} kbit/s`;
+  const fmtK = v => v >= 1000 ? '1 Mbps' : `${v < 100 ? v.toFixed(1).replace(/\.0$/, '') : v.toFixed(0)} kbps`;
   if (err <= 0.08) return { label: fmtK(best), title: `≈ ${k.toFixed(1)} kbit/s → ${fmtK(best)} (Δ ${(err * 100).toFixed(1)}%)` };
   return { label: `~${k.toFixed(0)}k`, title: `≈ ${k.toFixed(1)} kbit/s — no standard rate within 8%` };
 }
