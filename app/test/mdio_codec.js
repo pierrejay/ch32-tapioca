@@ -56,11 +56,15 @@
       if (ones >= 32 && i + 32 <= n) {
         const f = i;                                  // frame starts at i (32 bits)
         if (bval(bits, f, f + 2) === 0b01) {           // ST = 01
-          out.push({
-            op: bval(bits, f + 2, f + 4), phyad: bval(bits, f + 4, f + 9),
-            regad: bval(bits, f + 9, f + 14), ta: bval(bits, f + 14, f + 16),
-            data: bval(bits, f + 16, f + 32), preamble: ones,
-          });
+          const op = bval(bits, f + 2, f + 4);
+          const phyad = bval(bits, f + 4, f + 9);
+          const regad = bval(bits, f + 9, f + 14);
+          const ta = bval(bits, f + 14, f + 16);
+          const data = bval(bits, f + 16, f + 32);
+          // Conservative "no slave drove the read" detector: on a pulled-up MDIO
+          // line, a missing read response appears as TA=11 + DATA=0xffff.
+          const noResponse = op === OP_R && ta === 0b11 && data === 0xFFFF;
+          out.push({ op, phyad, regad, ta, data, preamble: ones, noResponse });
           i += 32; ones = 0; continue;
         }
       }
@@ -82,15 +86,19 @@
       }
       if (reg === REG_MMD_DATA) {
         const devad = this.devad[phy], func = this.func[phy];
-        if (devad === undefined || func === undefined) return [this._raw(fr), null];
+        if (devad === undefined || func === undefined) return [this._raw(fr), fr.noResponse ? this._event(fr) : null];
         if (func === 0b00) {
           if (op === OP_W) { this.addr[phy + "_" + devad] = data; return [null, null]; }
-          return [this._raw(fr), null];
+          return [this._raw(fr), fr.noResponse ? this._event(fr) : null];
         }
         const key = phy + "_" + devad;
         const addr = this.addr[key];
         const dn = DEVAD_NAME[devad] || ("dev" + devad);
         const where = addr !== undefined ? `MMD${devad}(${dn})[0x${hex4(addr)}]` : `MMD${devad}(${dn})[?]`;
+        if (fr.noResponse) {
+          return [`PHY${phy} ${where} read  !! NO RESP (TA=${fr.ta.toString(2).padStart(2, "0")})`,
+                  { phy, devad, addr: addr === undefined ? null : addr, op, data: null, noResponse: true }];
+        }
         const arrow = op === OP_R ? "=>" : "<=";
         const kind = op === OP_R ? "read " : "write";
         const text = `PHY${phy} ${where} ${kind} ${arrow} 0x${hex4(data)}`;
@@ -99,9 +107,15 @@
         if (inc && addr !== undefined) this.addr[key] = (addr + 1) & 0xFFFF;
         return [text, ev];
       }
-      return [this._raw(fr), { phy, devad: null, addr: reg, op, data }];
+      return [this._raw(fr), this._event(fr)];
+    }
+    _event(fr) {
+      const ev = { phy: fr.phyad, devad: null, addr: fr.regad, op: fr.op, data: fr.noResponse ? null : fr.data };
+      if (fr.noResponse) ev.noResponse = true;
+      return ev;
     }
     _raw(fr) {
+      if (fr.noResponse) return `PHY${fr.phyad} C22 REG${fr.regad} READ !! NO RESP (TA=${fr.ta.toString(2).padStart(2, "0")})`;
       const arrow = fr.op === OP_R ? "=>" : "<=";
       return `PHY${fr.phyad} C22 REG${fr.regad} ${OP_NAME[fr.op] || "?"} ${arrow} 0x${hex4(fr.data)}`;
     }

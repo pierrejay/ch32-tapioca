@@ -16,12 +16,13 @@ const ok = (c, m) => { if (c) pass++; else { fail++; console.log('  ✗ ' + m); 
 
 // ---- builders ---------------------------------------------------------------
 const pushN = (bits, v, n) => { for (let i = n - 1; i >= 0; i--) bits.push((v >> i) & 1); };
-function mdioFrameBits(op, phyad, regad, data) {
+function mdioFrameBits(op, phyad, regad, data, ta) {
   const bits = [];
+  if (ta === undefined) ta = (op === M.OP_R) ? 0b00 : 0b10;
   for (let i = 0; i < 32; i++) bits.push(1);   // preamble (>=32 ones)
   bits.push(0, 1);                              // ST = 01
   pushN(bits, op, 2); pushN(bits, phyad, 5); pushN(bits, regad, 5);
-  bits.push(1, 1);                             // TA (ignored on decode)
+  pushN(bits, ta, 2);
   pushN(bits, data, 16);
   return bits;                                  // 64 bits = 8 bytes, byte-aligned
 }
@@ -91,6 +92,23 @@ ok(enc.includes(0xFE) || enc.includes(0xFD), 'expected a 0xFE/0xFD byte inside t
 const d4 = M.recordsFromBinary(Uint8Array.from([...enc, 0xFF]), 2);
 ok(d4.records.length === 1 && d4.losses === 0 && d4.metas.length === 0,
    `mid-payload 0xFD/0xFE wrongly treated as envelope marker: ${JSON.stringify({ r: d4.records.length, l: d4.losses, m: d4.metas.length })}`);
+
+// ---- 5. missing MDIO read response: TA=11 + DATA=0xffff --------------------
+// In MMD post-increment mode, a failed read must NOT advance the folded address.
+const noRespPayload = bitsToBytes([].concat(
+  mdioFrameBits(M.OP_W, 1, 13, (0b00 << 14) | 31),
+  mdioFrameBits(M.OP_W, 1, 14, 0x060C),
+  mdioFrameBits(M.OP_W, 1, 13, (0b10 << 14) | 31),
+  mdioFrameBits(M.OP_R, 1, 14, 0xFFFF, 0b11),       // pulled-up/no slave response
+  mdioFrameBits(M.OP_R, 1, 14, 0xBEEF, 0b00)        // should still be MMD31[0x060C]
+));
+const d5 = M.decodeCapture(wire2([record(noRespPayload)]), 2);
+const mmd31 = d5.events.filter(e => e.devad === 31);
+ok(mmd31.length === 2, `MMD no-response event count = ${mmd31.length}, want 2`);
+ok(mmd31[0].noResponse === true && mmd31[0].data === null && mmd31[0].addr === 0x060C,
+   `no-response event malformed: ${JSON.stringify(mmd31[0])}`);
+ok(mmd31[1].noResponse !== true && mmd31[1].data === 0xBEEF && mmd31[1].addr === 0x060C,
+   `MMD address advanced after failed read: ${JSON.stringify(mmd31[1])}`);
 
 console.log(`${pass} passed, ${fail} failed`);
 console.log(fail === 0 ? '\n✅ ALL MDIO CODEC TESTS PASSED' : `\n❌ ${fail} FAILURE(S)`);

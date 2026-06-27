@@ -23,7 +23,7 @@ DEVAD_NAME = {
 REG_MMD_CTRL = 13      # MACR : [15:14]=function, [4:0]=devad
 REG_MMD_DATA = 14      # MAADR: address or data, per last function
 
-Frame = namedtuple("Frame", "op phyad regad ta data preamble")
+Frame = namedtuple("Frame", "op phyad regad ta data preamble no_response")
 Record = namedtuple("Record", "type t_us dur_us onset_us flags n payload")
 
 ONSET_N = 8                 # firmware stamps onset at the 8th byte (clocked_sniffer.hpp)
@@ -57,8 +57,15 @@ def decode_bits(bits):
         if ones >= 32 and i + 32 <= n:
             f = bits[i:i + 32]
             if _bval(f[0:2]) == 0b01:                       # ST = 01
-                yield Frame(_bval(f[2:4]), _bval(f[4:9]), _bval(f[9:14]),
-                            _bval(f[14:16]), _bval(f[16:32]), ones)
+                op = _bval(f[2:4])
+                phyad = _bval(f[4:9])
+                regad = _bval(f[9:14])
+                ta = _bval(f[14:16])
+                data = _bval(f[16:32])
+                # Conservative "no slave drove the read" detector: on a pulled-up MDIO
+                # line, a missing read response appears as TA=11 + DATA=0xffff.
+                no_response = (op == OP_R and ta == 0b11 and data == 0xFFFF)
+                yield Frame(op, phyad, regad, ta, data, ones, no_response)
                 i += 32
                 ones = 0
                 continue
@@ -90,16 +97,20 @@ class MmdFolder:
             devad = self.devad.get(phy)
             func = self.func.get(phy)
             if devad is None or func is None:
-                return self._raw(fr), None
+                return self._raw(fr), self._event(fr) if fr.no_response else None
             if func == 0b00:
                 if op == OP_W:
                     self.addr[(phy, devad)] = data
                     return None, None
-                return self._raw(fr), None
+                return self._raw(fr), self._event(fr) if fr.no_response else None
             addr = self.addr.get((phy, devad))
             dn = DEVAD_NAME.get(devad, "dev%d" % devad)
             where = ("MMD%d(%s)[0x%04X]" % (devad, dn, addr)) if addr is not None \
                 else ("MMD%d(%s)[?]" % (devad, dn))
+            if fr.no_response:
+                text = "PHY%-2d %-22s read  !! NO RESP (TA=%s)" % (phy, where, format(fr.ta, "02b"))
+                return text, {"phy": phy, "devad": devad, "addr": addr, "op": op,
+                              "data": None, "no_response": True}
             arrow = "=>" if op == OP_R else "<="
             kind = "read " if op == OP_R else "write"
             text = "PHY%-2d %-22s %s %s 0x%04X" % (phy, where, kind, arrow, data)
@@ -109,11 +120,21 @@ class MmdFolder:
                 self.addr[(phy, devad)] = (addr + 1) & 0xFFFF
             return text, ev
 
-        return self._raw(fr), {"phy": phy, "devad": None, "addr": reg,
-                               "op": op, "data": data}
+        return self._raw(fr), self._event(fr)
+
+    @staticmethod
+    def _event(fr):
+        ev = {"phy": fr.phyad, "devad": None, "addr": fr.regad, "op": fr.op,
+              "data": None if fr.no_response else fr.data}
+        if fr.no_response:
+            ev["no_response"] = True
+        return ev
 
     @staticmethod
     def _raw(fr):
+        if fr.no_response:
+            return "PHY%-2d C22 REG%-2d            READ  !! NO RESP (TA=%s)" % (
+                fr.phyad, fr.regad, format(fr.ta, "02b"))
         arrow = "=>" if fr.op == OP_R else "<="
         return "PHY%-2d C22 REG%-2d            %-5s %s 0x%04X" % (
             fr.phyad, fr.regad, OP_NAME.get(fr.op, "?"), arrow, fr.data)
@@ -121,9 +142,10 @@ class MmdFolder:
 
 def raw_line(fr):
     arrow = "=>" if fr.op == OP_R else "<="
-    return ("PHY%-2d C22 REG%-2d %-6s %s 0x%04X  | TA=%s pre=%d"
+    suffix = " NO-RESP" if fr.no_response else ""
+    return ("PHY%-2d C22 REG%-2d %-6s %s 0x%04X  | TA=%s pre=%d%s"
             % (fr.phyad, fr.regad, OP_NAME.get(fr.op, "?"), arrow,
-               fr.data, format(fr.ta, "02b"), fr.preamble))
+               fr.data, format(fr.ta, "02b"), fr.preamble, suffix))
 
 
 # ---- wire=2 transport envelope (COBS-0xFF records, 0xFF boundary) -----------
