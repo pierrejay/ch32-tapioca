@@ -30,7 +30,7 @@ extern "C" {
 
 static constexpr uint16_t kEp0Size = usb_desc::kEp0Size;
 
-UsbCdc *UsbCdc::self_ = nullptr;
+UsbCdc* UsbCdc::self_ = nullptr;
 
 // ------------------------------------------------------------------
 // Setup / init

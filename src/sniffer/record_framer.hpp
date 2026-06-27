@@ -1,7 +1,7 @@
 // record_framer.hpp - device-side record framing. Stateless namespace of
 // inline helpers; the caller owns every output buffer.
 //
-// Emits the shared transport envelope (README §"USB wire protocol") decoded by the host
+// Emits the shared transport envelope (docs/usb-wire-api.md) decoded by the host
 // in mdio_codec.js demuxV2():
 //
 //   record   : COBS-0xFF( type|t_us|dur_us|onset_us|flags|n|payload )  then 0xFF

@@ -36,7 +36,7 @@ private:
 
     // ---- RAM staging ring (USB backpressure absorber) -----------------------
     // 2048 so a whole max binary record (~783 B encoded) always fits even with
-    // some USB backlog -> a record is never dropped for lack of staging room. 
+    // some USB backlog -> a record is never dropped for lack of staging room.
     static constexpr uint16_t RING_SZ   = 2048;          // power of two
     uint16_t ringCount() const { return (uint16_t)ring_.size(); }
     uint16_t ringSpace() const { return (uint16_t)ring_.free(); }
@@ -46,7 +46,7 @@ private:
     // ---- binary burst-record protocol (COBS-0xFF, 0xFF boundary) -------------
     // One COBS-0xFF framed, timestamped record per burst; a [MODE clocked wire=2]
     // block is staged periodically so a host can confirm the mode even on a mute
-    // bus. Layout + framing in clocked_sniffer.cpp; envelope in README §"USB wire protocol". 
+    // bus.
     static constexpr uint16_t BURST_MAX     = 768;       // payload cap (> a cycle)
     static constexpr uint32_t BURST_TCAP_US = 50000;     // continuous-traffic cap
     static constexpr uint16_t ONSET_N       = 8;         // clock-estimate window
@@ -60,7 +60,7 @@ private:
     Ring<RING_SZ> ring_;
     // Two loss sources kept distinct so a real capture says WHICH ring overran:
     // ovfRam_ = RAM ring full (USB too slow); ovfPioc_ = PIOC FIFO overrun (loop
-    // fell behind). They imply different fixes. 
+    // fell behind). They imply different fixes.
     uint16_t ovfRam_  = 0;
     uint16_t ovfPioc_ = 0;
 
@@ -81,7 +81,7 @@ private:
     // Symmetric with RleSniffer's [T] block, minus the TIM3-drain fields: the clocked
     // path drains from the main loop, so there's no drnCpu / maxGap to report. The
     // per-record flags byte already carries overflow live; diagOvf* re-sum it per
-    // [T] window so a single line also shows accumulated loss. 
+    // [T] window so a single line also shows accumulated loss.
     uint32_t loopCalls_   = 0;               // service() calls = main-loop iterations
     uint16_t ramHi_       = 0;               // max RAM-ring fill over the window (/RING_SZ)
     uint16_t txMinFree_   = 0xFFFF;          // min tx_ free space (0 = USB EP is the ceiling)

@@ -104,7 +104,7 @@ void LedBlinker::setLed(bool state)
     }
 }
 
-void LedBlinker::start(const BlinkCommand &cmd, uint32_t now)
+void LedBlinker::start(const BlinkCommand& cmd, uint32_t now)
 {
     current_ = cmd;
 

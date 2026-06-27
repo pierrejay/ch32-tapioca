@@ -48,7 +48,7 @@ private:
     static bool expired(uint32_t now, uint32_t deadline);
 
     void setLed(bool state);
-    void start(const BlinkCommand &cmd, uint32_t now);
+    void start(const BlinkCommand& cmd, uint32_t now);
 
     GPIO_TypeDef* port_;
     uint32_t pin_;

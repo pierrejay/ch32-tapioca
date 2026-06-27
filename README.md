@@ -9,21 +9,21 @@ listening) is planned.
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/app_can_live.png" alt="CAN live IDs dashboard view" width="420"><br>
+      <img src="docs/pics/app_can_live.png" alt="CAN live IDs dashboard view" width="420"><br>
       <sub>CAN live ID view</sub>
     </td>
     <td align="center" width="50%">
-      <img src="docs/app_live_trace.png" alt="CAN trace dashboard view" width="420"><br>
+      <img src="docs/pics/app_live_trace.png" alt="CAN trace dashboard view" width="420"><br>
       <sub>CAN trace view</sub>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <img src="docs/app_mdio.png" alt="MDIO dashboard view" width="420"><br>
+      <img src="docs/pics/app_mdio.png" alt="MDIO dashboard view" width="420"><br>
       <sub>MDIO register/MMD view</sub>
     </td>
     <td align="center" width="50%">
-      <img src="docs/app_dmx.png" alt="DMX512 dashboard view" width="420"><br>
+      <img src="docs/pics/app_dmx.png" alt="DMX512 dashboard view" width="420"><br>
       <sub>DMX512 universe view</sub>
     </td>
   </tr>
@@ -148,175 +148,25 @@ Host tests: `bash app/test/run_all.sh` - the codec/framing/mode tests need Node 
 | CAN (classic, 1 Mbps) | RLE | a very cheap CAN analyzer. Tested against an ESP32 (TWAI) and a real bus with QDD motors through an SN65HVD230 CAN PHY |
 | DMX (250 kbps) | RLE | handy DMX-line debugger. Tested against an ESP32 (EZDMX) and real lighting drivers over an RS485 transceiver |
 
-## The USB wire protocol (API)
+## USB wire protocol and capture pipeline
 
-The device speaks a small binary envelope over USB-CDC. One byte, `0xFF`, is the
-universal segment boundary. In raw `rle`, bytes `0x81..0xFF` are free for sentinels
-because run data only uses `0x00..0x80`; in `clocked`, `0xFD` / `0xFE` are control
-bytes only when they start a `0xFF`-delimited segment.
+Tapioca uses one USB-CDC link for both control and capture data. The host sends
+plain-text control commands such as `!mode rle` / `!mode clocked`; the device
+streams a compact binary format back to the host.
 
-### Device → host
+The short version:
 
-The active mode is self-describing: the device periodically emits a `[MODE ...]`
-metadata block. The `wire=2` field is a format-version tag so hosts can reject or
-adapt to future envelope changes.
+| mode | stream shape | used for |
+|---|---|---|
+| `rle` | raw run-length bytes plus sentinels | CAN, DMX, LIN/UART-style asynchronous buses |
+| `clocked` | COBS-`0xFF` framed sampled-burst records | MDIO, SPI-style externally clocked buses |
 
-#### Common sentinel bytes
+The firmware deliberately keeps protocol decode host-side. The device captures
+edges/samples, preserves timing, reports loss boundaries, and lets the browser or
+scripts decode CAN/DMX/MDIO/etc.
 
-| byte / block | meaning |
-|---|---|
-| `0xFF` | segment boundary / hard cut |
-| `0xFD` | capture loss marker: bytes were dropped here; do not decode across it |
-| `0xFE '[' ascii... ']' 0xFE` | metadata block, e.g. `[MODE ...]` or `[T ...]` diagnostics |
-
-The metadata segment itself is:
-
-```text
-FE "[MODE clocked wire=2]" FE FF
-FE "[MODE rle wire=2 thi=9 tlo=8 fcpu=48000000]" FE FF
-```
-
-Timing:
-
-- At mode start, both datapaths emit an immediate `[MODE ...]` marker.
-- In `clocked`, the marker is queued as a standalone `0xFF`-terminated segment,
-  between records, then repeated about once per second.
-- In `rle`, the periodic marker is only emitted after an idle boundary, when no
-  run-byte frame is in flight. On the wire this commonly looks like:
-
-```text
-... FF  FE "[MODE rle ...]" FE FF  ...
-    │   └─ metadata segment ─┘
-    └─ idle boundary that closed the previous RLE frame
-```
-
-So the two stream shapes are:
-
-```text
-clocked:
-  FF  FE "[MODE clocked...]" FE FF <COBS-record> FF <COBS-record> FF  ...
-      └──── mode metadata ────┘   └── record ───┘  └── record ───┘
-
-rle:
-  FF  FE "[MODE rle ...]" FE FF <run-bytes> FF  <run-bytes> FF  ...
-      └── mode metadata ───┘    └─ frame ─┘     └─ frame ─┘
-```
-
-With `-D DIAG`, `[T ...]` diagnostics use the same `0xFE ... 0xFE` metadata shape.
-In `clocked` they are standalone `0xFF`-terminated segments. In `rle` they may be
-inserted inline in the run-byte stream, without adding a `0xFF`; hosts strip the
-paired `0xFE ... 0xFE` block before reconstructing runs.
-
-#### RLE mode: raw run-byte stream
-
-RLE mode is not record-framed and does not use COBS. It is a raw stream of
-alternating run durations plus sentinels.
-
-How to read run-bytes:
-
-- Bytes `0x00..0x7F` end the current run. Their value is the last chunk of the run.
-- Byte `0x80` means: “this same run is still going; add 128 ticks and keep the same level”.
-- So a run is: zero or more `0x80` bytes, followed by one byte `< 0x80`.
-- Total run length = `128 × number_of_0x80_bytes + final_byte`.
-
-Examples:
-
-| bytes | decoded run length | what happens next |
-|---|---:|---|
-| `06` | 6 ticks | run ends, level flips |
-| `80 2C` | 128 + 44 = 172 ticks | run ends, level flips |
-| `80 80 2C` | 128 + 128 + 44 = 300 ticks | run ends, level flips |
-
-- The special case is long idle: after enough consecutive `0x80` bytes, the firmware emits
-  `0xFF` as an idle boundary and drops the rest of that idle run. In that case the idle run
-  does **not** need to end with a byte `< 0x80` on the wire.
-- Run-bytes do **not** carry HIGH/LOW. The protocol decoder anchors the first
-  level: CAN starts at SOF dominant/LOW; DMX idles HIGH then BREAK is LOW.
-- `0xFF` is a hard boundary inserted by the firmware on long idle.
-- `0xFD` is a hard boundary caused by capture loss.
-
-Example, shortened for readability:
-
-```text
-06 0C 06 80 80 ... 80 FF
-│  │  │  └───────────┘ └─ idle boundary
-│  │  │       long idle run, emitted as many 0x80 continuation bytes
-│  │  └─ run C = 6 ticks, then flip level
-│  └──── run B = 12 ticks, then flip level
-└─────── run A = 6 ticks, then flip level
-```
-
-With the default `RLE_MIN_KBPS=5`, the idle squelch threshold is
-`CAP_IDLE_K=150`: the firmware forwards the first 149 idle `0x80` bytes, emits
-one `0xFF` instead of the 150th, then drops the rest of that idle run until the
-line moves again. So `0xFF` means “idle boundary”, not “the previous run ended
-exactly here”.
-
-#### `clocked` mode: COBS-`0xFF` records
-
-`clocked` mode is record-based. Every data record is:
-
-```text
-COBS-FF(raw_record) FF
-```
-
-The raw record layout is little-endian:
-
-| offset | field | bytes in the example | meaning |
-|---:|---|---|---|
-| 0 | `type` | `01` | sampled-data record |
-| 1..4 | `t_us` | `e8 03 00 00` | start timestamp = 1000 µs |
-| 5..6 | `dur_us` | `c8 00` | burst duration = 200 µs |
-| 7..8 | `onset_us` | `26 00` | time to the early clock-estimation point = 38 µs |
-| 9 | `flags` | `00` | bit0 PIOC overflow, bit1 RAM overflow, bit2 continued |
-| 10..11 | `n` | `02 00` | payload length = 2 bytes |
-| 12.. | `payload` | `a5 5a` | clock-sampled data bytes |
-
-That example record before COBS is:
-
-```text
-01 e8 03 00 00 c8 00 26 00 00 02 00 a5 5a
-```
-
-Because this particular raw record contains no `0xFF`, the COBS-`0xFF` encoding is
-just one prefix byte plus the payload, then the boundary:
-
-```text
-0f 01 e8 03 00 00 c8 00 26 00 00 02 00 a5 5a FF
-```
-
-If the sampled payload contains `0xFF`, COBS-`0xFF` escapes it so `0xFF` remains
-only a segment boundary. If a burst exceeds the firmware record cap, `flags&0x04`
-marks the record as `continued`; the host joins continued records before protocol
-decode.
-
-### Host → device
-
-| line | meaning |
-|---|---|
-| `!mode rle\n` / `!mode clocked\n` | switch the capture mode (strict parse: a malformed line is ignored, so line noise can't trigger a reconfig) |
-
-The host owns the protocol↔mode mapping (CAN/DMX → RLE, MDIO/SPI → clocked) and all
-decoding; the device only knows the two modes. (The browser UI labels the RLE mode
-**"timed"** for humans; on the wire it's `rle`.)
-
-### Diagnostics
-
-Built with `-D DIAG`, the device adds a `[T …]` telemetry block
-(~1 Hz) inside the same `0xFE`-framed envelope - **off by default** so the capture stream
-stays clean. The fields differ by mode:
-
-- **RLE** reports the full drain path including the
-  TIM3 ISR cost (`drnCpu`) and PIOC-ring margin (`maxGap`)
-- **clocked** reports loop/USB
-  throughput and overflow (no `drnCpu`/`maxGap` - it drains from the main loop, not an ISR).
-
-Watch it live with:
-
-```sh
-python3 scripts/diag_monitor.py /dev/cu.usbmodemXXXX
-```
-(it also prints the `[MODE …]` heartbeat, which is always on). The `rle_sniffer` / `clocked_sniffer` build envs enable `DIAG` by default for exactly this bus-revalidation use.
+For the full byte-level format, examples, diagnostics, and the internal
+PIOC → RAM ring → USB pipeline, see [docs/usb-wire-api.md](docs/usb-wire-api.md).
 
 ## Tips & gotchas (from the bring-up)
 
@@ -370,7 +220,7 @@ clocked clean to ~3 MHz.
 |---|---|
 | `src/` | firmware (PlatformIO, `framework = noneos-sdk`) |
 | `src/sniffer/` | the two datapaths (`RleSniffer`, `ClockedSniffer`) + wire helpers (`mode_command`, `record_framer`) |
-| `src/{usb,hal,util}/` | USB-CDC · SDK + ISRs · ring/cobs/led/spi-gen |
+| `src/{usb,hal,util}/` | USB-CDC, SDK + ISRs, ring/cobs/led/spi-gen |
 | `pioc/` | the PIOC capture blobs (`clocked_sniffer`, `rle_sniffer`) + `assemble.py` (a small native assembler for the PIOC `.ASM` files) |
 | `app/` | the Web Serial browser dashboard + its Node/C++ test suite |
 | `scripts/` | offline Python decoders (CLI/CI) + throughput probe + `diag_monitor` |
