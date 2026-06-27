@@ -15,6 +15,7 @@
 // Passive tap: the blob forces the PIOC IO pins to input; this never drives a bus.
 #pragma once
 
+#include "ring.hpp"
 #include "usb_cdc.hpp"
 
 class ClockedSniffer
@@ -37,9 +38,8 @@ private:
     // 2048 so a whole max binary record (~783 B encoded) always fits even with
     // some USB backlog -> a record is never dropped for lack of staging room. 
     static constexpr uint16_t RING_SZ   = 2048;          // power of two
-    static constexpr uint16_t RING_MASK = RING_SZ - 1;
-    uint16_t ringCount() const { return (uint16_t)(head_ - tail_) & RING_MASK; }
-    uint16_t ringSpace() const { return RING_MASK - ringCount(); }
+    uint16_t ringCount() const { return (uint16_t)ring_.size(); }
+    uint16_t ringSpace() const { return (uint16_t)ring_.free(); }
     void     ringPush(const uint8_t* p, uint16_t n);
     uint16_t ringPop(uint8_t* out, uint16_t max);
 
@@ -57,9 +57,7 @@ private:
     UsbCdc& usb_;
 
     // RAM ring
-    uint8_t  ring_[RING_SZ];
-    uint16_t head_    = 0;
-    uint16_t tail_    = 0;
+    Ring<RING_SZ> ring_;
     // Two loss sources kept distinct so a real capture says WHICH ring overran:
     // ovfRam_ = RAM ring full (USB too slow); ovfPioc_ = PIOC FIFO overrun (loop
     // fell behind). They imply different fixes. 

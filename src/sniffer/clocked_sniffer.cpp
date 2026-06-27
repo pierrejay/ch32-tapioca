@@ -17,20 +17,12 @@ volatile uint8_t* const ClockedSniffer::DR_ = (volatile uint8_t*)PIOC_SFR_BASE;
 // ---- RAM staging ring -----------------------------------------------------
 void ClockedSniffer::ringPush(const uint8_t* p, uint16_t n)
 {
-    if (ringSpace() < n) { ovfRam_++; return; }
-    uint16_t h = head_;
-    for (uint16_t i = 0; i < n; i++) ring_[(h + i) & RING_MASK] = p[i];
-    head_ = h + n;
+    if (!ring_.pushAll(p, n)) ovfRam_++;
 }
 
 uint16_t ClockedSniffer::ringPop(uint8_t* out, uint16_t max)
 {
-    uint16_t n = ringCount();
-    if (n > max) n = max;
-    uint16_t t = tail_;
-    for (uint16_t i = 0; i < n; i++) out[i] = ring_[(t + i) & RING_MASK];
-    tail_ = t + n;
-    return n;
+    return (uint16_t)ring_.pop(out, max);
 }
 
 // ---- PIOC bring-up --------------------------------------------------------
@@ -64,7 +56,7 @@ void ClockedSniffer::begin(uint32_t nowMs)
     loadRingBlob();
     sniffTail_   = DR_[RING_HEAD];
     sniffLastMs_ = nowMs;
-    head_ = tail_ = 0;
+    ring_.clear();
     ovfRam_ = ovfPioc_ = 0;
     burstOpen_ = false;
     burstN_    = 0;
@@ -81,7 +73,7 @@ void ClockedSniffer::begin(uint32_t nowMs)
 void ClockedSniffer::stop()
 {
     R8_SYS_CFG = 0;             // halt the PIOC eMCU (clock gate off)
-    head_ = tail_ = 0;          // flush RAM staging ring
+    ring_.clear();              // flush RAM staging ring
     burstOpen_ = false;
     burstN_    = 0;
 }
@@ -221,16 +213,17 @@ void ClockedSniffer::service(uint32_t nowMs)
             uint32_t cap = 0;
             uint8_t* dst = usb_.txReserve(&cap);     // contiguous writable TX bytes
             if (cap) {
-                uint16_t outl = 0;
-                uint16_t t = tail_;
+                uint16_t srcCap = (uint16_t)ring_.readContig();
+                if (n > srcCap) n = srcCap;            // source ring wrap -> rest next loop
+                if (n > cap) n = (uint16_t)cap;        // TX run full -> rest next loop
+                const uint8_t* src = ring_.readPtr();
                 uint16_t i = 0;
                 for (; i < n; i++) {
                     if ((i & (PUMP_EVERY - 1)) == 0) usb_.pump();   // re-arm the EP mid-drain
-                    if (outl >= cap) break;          // TX run full -> rest next loop
-                    dst[outl++] = ring_[(uint16_t)(t + i) & RING_MASK];
+                    dst[i] = src[i];
                 }
-                tail_ = t + i;                        // consumed exactly i bytes
-                usb_.txCommit(outl);
+                ring_.readCommit(i);
+                usb_.txCommit(i);
             }
         }
     }

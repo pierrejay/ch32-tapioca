@@ -31,24 +31,26 @@ public:
     bool     full() const { return size() == Capacity; }
 
     // Producer side: copy up to `len` items in, returns the number accepted.
-    uint32_t push(const T* src, uint32_t len)
+    __attribute__((always_inline)) uint32_t push(const T* src, uint32_t len)
     {
         uint32_t n = free();
         if (len < n) n = len;
-        uint32_t h = head_;            // cache the volatile once: it only advances after the
-// loop, so the consumer still sees data appear atomically
-// at head_=h+n - but we save n volatile reloads.
-        for (uint32_t i = 0; i < n; i++)
-        {
-            buf_[index(h + i)] = src[i];
-        }
-        head_ = h + n;
-        return n;
+        return copyIn(src, n);
     }
 
     bool push(const T& item)
     {
         return push(&item, 1) == 1;
+    }
+
+    // Producer side, atomic at the API level: either the whole block fits and is
+    // copied, or nothing is written. Use this for framed records that must not
+    // be torn in the stream.
+    __attribute__((always_inline)) bool pushAll(const T* src, uint32_t len)
+    {
+        if (free() < len) return false;
+        copyIn(src, len);
+        return true;
     }
 
     // Zero-copy producer side: write straight into the backing buffer, no temp + no
@@ -63,6 +65,20 @@ public:
     }
     T*   writePtr() { return &buf_[index(head_)]; }
     void writeCommit(uint32_t n) { head_ += n; }
+
+    // Zero-copy consumer side: read straight from the backing buffer, no temp +
+    // no second copy. readContig() = contiguous readable run from tail_ to the
+    // wrap point (or to "empty", whichever is smaller). Consume up to that many
+    // at readPtr(), then readCommit(n). Single-consumer only (tail_ owner).
+    uint32_t readContig() const
+    {
+        uint32_t s = size();
+        uint32_t toWrap = Capacity - index(tail_);
+        return (s < toWrap) ? s : toWrap;
+    }
+    const T* readPtr() const { return &buf_[index(tail_)]; }
+    T*       readPtr() { return &buf_[index(tail_)]; }
+    void     readCommit(uint32_t n) { tail_ += n; }
 
     // Consumer side: copy up to `len` items out, returns the number read.
     uint32_t pop(T* dst, uint32_t len)
@@ -84,6 +100,19 @@ public:
     }
 
 private:
+    __attribute__((always_inline)) uint32_t copyIn(const T* src, uint32_t n)
+    {
+        uint32_t h = head_;            // cache the volatile once: it only advances after the
+                                       // loop, so the consumer still sees data appear atomically
+                                       // at head_=h+n - but we save n volatile reloads.
+        for (uint32_t i = 0; i < n; i++)
+        {
+            buf_[index(h + i)] = src[i];
+        }
+        head_ = h + n;
+        return n;
+    }
+
     static uint32_t index(uint32_t pos)
     {
         if constexpr ((Capacity & (Capacity - 1)) == 0)

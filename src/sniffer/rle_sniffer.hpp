@@ -94,6 +94,10 @@ private:
     UsbCdc& usb_;
 
     // RAM ring
+    // Deliberately not Ring<>: drainPioc() is a 50 kHz ISR hot path.
+    // The generic Ring API was benchmarked/objdumped and added branches/prologue
+    // unless exposing a low-level producer cursor, which defeats the clarity win.
+    // Keep this hand-rolled ring until a measured replacement is strictly better.
     uint8_t  ring_[RING_SZ];
     // SPSC across the TIM3 ISR / main loop: head_ produced by the drain ISR, tail_ by
     // service(). Single-core + aligned u16 => reads are atomic, but volatile is still
