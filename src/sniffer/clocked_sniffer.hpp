@@ -68,6 +68,8 @@ private:
     // sniffer drain state
     uint8_t  sniffTail_   = 0;               // our cursor into the PIOC FIFO
     uint32_t sniffLastMs_ = 0;               // ms of the last captured byte
+    uint32_t partialSeenMs_ = 0;             // ms when CPU first noticed a 1..7-bit partial
+    uint8_t  partialSeenBits_ = 0;           // nonzero while ACC holds a watched partial
 
     // current burst
     uint8_t  burstBuf_[BURST_MAX];
@@ -76,6 +78,7 @@ private:
     uint32_t burstLast_  = 0;                 // micros of last byte
     uint16_t burstOnset_ = 0;                 // micros 1st->ONSET_N-th byte (0 = n/a)
     bool     burstOpen_  = false;
+    bool     burstNeedTerminal_ = false;      // a continued record is open and needs a terminal seam
     uint8_t  tailBits_   = 0;                 // valid bits in the last (flushed partial) byte; 0 = all complete
 
 #ifdef DIAG

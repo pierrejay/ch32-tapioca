@@ -311,6 +311,8 @@ def logical_bursts(records):
     """Generator: Records -> LBursts (continued chains joined)."""
     j = BurstJoiner()
     for r in records:
+        if r.flags & (FLAG_OVF_PIOC | FLAG_OVF_RAM):
+            j = BurstJoiner()
         lb = j.feed(r)
         if lb is not None:
             yield lb

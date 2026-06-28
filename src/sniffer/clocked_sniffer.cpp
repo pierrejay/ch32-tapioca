@@ -59,6 +59,7 @@ void ClockedSniffer::restartPioc()
     R8_SYS_CFG |= RB_MST_RESET;
     R8_SYS_CFG  = RB_MST_IO_EN0 | RB_MST_IO_EN1;
     R8_SYS_CFG |= RB_MST_CLK_GATE;
+    Delay_Us(1);                       // let MCU_START clear HEAD before the next host drain
 }
 
 // ---- lifecycle ------------------------------------------------------------
@@ -67,10 +68,14 @@ void ClockedSniffer::begin(uint32_t nowMs)
     loadRingBlob();
     sniffTail_   = DR_[RING_HEAD];
     sniffLastMs_ = nowMs;
+    partialSeenMs_ = nowMs;
+    partialSeenBits_ = 0;
     ring_.clear();
     ovfRam_ = ovfPioc_ = 0;
     burstOpen_ = false;
     burstN_    = 0;
+    burstNeedTerminal_ = false;
+    tailBits_  = 0;
     // Emit a 0xFF boundary first so the preceding boot text (no 0xFF in it)
     // becomes its own segment the host drops, then announce the mode immediately. 
     { uint8_t ff = 0xFF; ringPush(&ff, 1); }
@@ -87,6 +92,9 @@ void ClockedSniffer::stop()
     ring_.clear();              // flush RAM staging ring
     burstOpen_ = false;
     burstN_    = 0;
+    burstNeedTerminal_ = false;
+    tailBits_  = 0;
+    partialSeenBits_ = 0;
 }
 
 // ---- BINARY format (COBS-0xFF, 0xFF boundary) ==============================
@@ -113,7 +121,7 @@ void ClockedSniffer::stop()
 // follow) -> the host joins it with the next record before decoding. 
 void ClockedSniffer::emitRecord(bool continued)
 {
-    if (!burstOpen_) return;
+    if (!burstOpen_ && !(burstNeedTerminal_ && !continued)) return;
     // static (not stack): BURST_MAX is large, and emit is single-threaded.
     static uint8_t rec[12 + BURST_MAX];
     uint16_t k = 0;
@@ -140,6 +148,7 @@ void ClockedSniffer::emitRecord(bool continued)
         diagOvfPioc_ += ovfPioc_; diagOvfRam_ += ovfRam_;   // re-sum delivered loss for [T]
 #endif
         ovfPioc_ = ovfRam_ = 0;
+        burstNeedTerminal_ = continued;
     }
     else { ovfRam_++; }                          // record dropped, flag carries on
     burstOpen_ = false;
@@ -203,29 +212,45 @@ void ClockedSniffer::service(uint32_t nowMs)
     }
     if (got) { burstLast_ = Time::micros(); sniffLastMs_ = nowMs; }
 
+    uint8_t acc = DR_[0x3E];                    // DATA_REG30 = ACC
+    uint8_t kbits = 0;
+    for (uint8_t v = acc; v >>= 1;) kbits++;    // sentinel position = valid partial bits (0..7)
+    if (kbits) {
+        if (!partialSeenBits_) partialSeenMs_ = nowMs;
+        partialSeenBits_ = kbits;
+    } else {
+        partialSeenBits_ = 0;
+    }
+
     // finalize the open burst on an idle gap (>3 ms) or the continuous-traffic cap.
-    if (burstOpen_) {
+    bool partialOnlyIdle = kbits && !burstOpen_ && !burstNeedTerminal_ &&
+                           (uint32_t)(nowMs - partialSeenMs_) > 3;
+    if (burstOpen_ || burstNeedTerminal_ || partialOnlyIdle) {
         bool idle = (uint32_t)(nowMs - sniffLastMs_) > 3;
-        bool tcap = (uint32_t)(Time::micros() - burstT0_) > BURST_TCAP_US;
-        if (idle) {
+        bool tcap = burstOpen_ && (uint32_t)(Time::micros() - burstT0_) > BURST_TCAP_US;
+        if (idle || partialOnlyIdle) {
             // Clock stopped -> the eMCU is blocked at a WAITB, so ACC (the seeded bit
             // accumulator, DATA_REG30) is stable. Recover the in-flight partial byte: the
             // seed sentinel's position = the count of valid bits captured since the last
             // whole byte. Flush them MSB-justified with valid_bits, so a mid-byte stop
             // (clock glitch / >32-bit preamble / dirty stop) NEVER bleeds 1..7 bits into
             // the next burst and shifts the whole stream.
-            uint8_t acc = DR_[0x3E];                 // DATA_REG30 = ACC
-            uint8_t kbits = 0;
-            for (uint8_t v = acc; v >>= 1;) kbits++;  // position of the highest set bit (0..7)
             if (kbits && burstN_ < BURST_MAX) {
                 burstBuf_[burstN_++] = (uint8_t)((acc & ((1u << kbits) - 1)) << (8 - kbits));
                 tailBits_ = kbits;
+            }
+            if (!burstOpen_) {                     // close a previous FLAG_CONTINUED chain
+                burstOpen_ = true;                 // with an empty/partial terminal record.
+                burstLast_ = Time::micros();
+                burstT0_ = burstLast_;
+                burstOnset_ = 0;
             }
             emitRecord(false);
             tailBits_ = 0;
             if (kbits) {                             // discard the flushed partial in the eMCU
                 restartPioc();                       // so it can't re-emit those bits next byte
-                sniffTail_ = DR_[RING_HEAD];         // re-sync to the reset ring (HEAD back to 0)
+                sniffTail_ = 0;                       // MCU_START clears HEAD; avoid a stale immediate read
+                partialSeenBits_ = 0;
             }
         } else if (tcap) {
             emitRecord(false);                       // continuous traffic: time-bound the record

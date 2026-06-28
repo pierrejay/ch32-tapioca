@@ -291,8 +291,11 @@
     }
   }
   function logicalBursts(records) {
-    const out = []; const j = new BurstJoiner();
-    for (const r of records) { const lb = j.feed(r); if (lb) out.push(lb); }
+    const out = []; let j = new BurstJoiner();
+    for (const r of records) {
+      if (r.flags & (FLAG_OVF_PIOC | FLAG_OVF_RAM)) j = new BurstJoiner();
+      const lb = j.feed(r); if (lb) out.push(lb);
+    }
     return out;
   }
 
@@ -319,6 +322,10 @@
     const stream = new BitStream();                 // carries frames across burst cuts
     const frames = [], events = [];
     for (const lb of bursts) {
+      if (lb.flags & (FLAG_OVF_PIOC | FLAG_OVF_RAM)) {
+        stream.reset();
+        folder.reset();
+      }
       for (const fr of stream.feed(burstToBits(lb.payload, lb.valid_bits))) {
         frames.push(fr);
         const [text, ev] = folder.feed(fr);

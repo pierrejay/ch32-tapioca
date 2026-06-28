@@ -651,8 +651,11 @@
     }
   }
   function logicalBursts(records) {
-    const out = []; const j = new BurstJoiner();
-    for (const r of records) { const lb = j.feed(r); if (lb) out.push(lb); }
+    const out = []; let j = new BurstJoiner();
+    for (const r of records) {
+      if (r.flags & (FLAG_OVF_PIOC | FLAG_OVF_RAM)) j = new BurstJoiner();
+      const lb = j.feed(r); if (lb) out.push(lb);
+    }
     return out;
   }
 
@@ -679,6 +682,10 @@
     const stream = new BitStream();                 // carries frames across burst cuts
     const frames = [], events = [];
     for (const lb of bursts) {
+      if (lb.flags & (FLAG_OVF_PIOC | FLAG_OVF_RAM)) {
+        stream.reset();
+        folder.reset();
+      }
       for (const fr of stream.feed(burstToBits(lb.payload, lb.valid_bits))) {
         frames.push(fr);
         const [text, ev] = folder.feed(fr);
@@ -1619,12 +1626,16 @@ function mdioFeed(bytes) {
     mdio.folder = new MDIO.MmdFolder();          // reset the MMD state too: a half-seen REG13/14
   }                                              // sequence across a loss must not invent an MMD access.
   for (const rec of records) {
+    if (rec.flags & (MDIO.FLAG_OVF_PIOC | MDIO.FLAG_OVF_RAM)) {
+      mdio.loss++;
+      mdio._joiner = new MDIO.BurstJoiner();
+      mdio._stream.reset();
+      mdio.folder = new MDIO.MmdFolder();
+    }
     const lb = mdio._joiner.feed(rec);          // stitch FLAG_CONTINUED records into one logical burst:
     if (!lb) continue;                          // a frame cut at BURST_MAX would otherwise decode as
                                                 // two halves -> phantom MMD reads at the split point.
     if (lb.onset_us) { const r = MDIO.onsetMdcKHz(lb.onset_us); if (r) mdio.clk = r; }
-    if (lb.flags & (MDIO.FLAG_OVF_PIOC | MDIO.FLAG_OVF_RAM)) mdio.loss++;  // bytes dropped mid-capture:
-                                                // mark as loss, keep what decoded (never discard a burst).
     for (const fr of mdio._stream.feed(MDIO.burstToBits(lb.payload, lb.valid_bits))) {
       mdio.frames++; mdio.win.push(performance.now());
       const [text, ev] = mdio.folder.feed(fr); if (ev) mdioOnEvent(ev);

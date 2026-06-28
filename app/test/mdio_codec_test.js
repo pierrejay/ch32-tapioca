@@ -110,6 +110,65 @@ ok(mmd31[0].noResponse === true && mmd31[0].data === null && mmd31[0].addr === 0
 ok(mmd31[1].noResponse !== true && mmd31[1].data === 0xBEEF && mmd31[1].addr === 0x060C,
    `MMD address advanced after failed read: ${JSON.stringify(mmd31[1])}`);
 
+// ---- 6. continued records must decode only after an explicit terminal seam ----
+const oneWrite = bitsToBytes(mdioFrameBits(M.OP_W, 1, 4, 0x3333));
+const danglingContinued = M.decodeCapture(wire2([
+  record(oneWrite, { flags: M.FLAG_CONTINUED }),
+]), 2);
+ok(danglingContinued.events.length === 0,
+   `dangling continued record decoded without terminal: ${danglingContinued.events.length}`);
+const closedContinued = M.decodeCapture(wire2([
+  record(oneWrite, { flags: M.FLAG_CONTINUED }),
+  record([]),
+]), 2);
+ok(closedContinued.events.length === 1 && closedContinued.events[0].data === 0x3333,
+   `empty terminal did not close continued chain: ${JSON.stringify(closedContinued.events)}`);
+
+// ---- 7. overflow is a loss seam before the flagged record, not after joining ----
+const afterOvf = bitsToBytes(mdioFrameBits(M.OP_W, 1, 5, 0x4444));
+const ovfSeam = M.decodeCapture(wire2([
+  record(oneWrite, { flags: M.FLAG_CONTINUED }),
+  record(afterOvf, { flags: M.FLAG_OVF_PIOC }),
+]), 2);
+ok(ovfSeam.events.length === 1 && ovfSeam.events[0].data === 0x4444,
+   `overflow did not break continued chain: ${JSON.stringify(ovfSeam.events)}`);
+
+// ---- 8. valid_bits keeps only the top k bits of the last byte (mid-byte flush) ----
+// burstToBits is what reconstructs a non-byte-aligned stop exactly (no phantom bits).
+ok(JSON.stringify(M.burstToBits([0xFF, 0xA0], 3)) === JSON.stringify([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1]),
+   'burstToBits(...,3) must keep the top 3 bits (1,0,1) of 0xA0');
+ok(M.burstToBits([0xFF, 0xA0], 0).length === 16, 'burstToBits(...,0) keeps all 16 bits');
+ok(M.burstToBits([0xAA], 5).length === 5, 'burstToBits yields exactly valid_bits bits');
+
+// ---- 9. a mid-byte partial flush (valid_bits in flags) decodes the exact frame ----
+// Firmware idle flush of a 65-clock frame: 33-one preamble + 32-bit frame = 65 bits =
+// 8 full bytes + 1 partial bit (the DATA LSB) in a 9th byte (MSB-justified, low 7 zero
+// padded); the terminal record carries valid_bits=1 in flags bits 3..5.
+const f65 = [1].concat(mdioFrameBits(M.OP_W, 1, 4, 0x3333));   // 1 + 64 = 33 preamble + 32 frame
+ok(f65.length === 65, `test setup: want 65 bits, got ${f65.length}`);
+const p65 = bitsToBytes(f65);                                  // 9 bytes, last = 1 real bit + 7 pad
+ok(p65.length === 9, `test setup: want 9 bytes, got ${p65.length}`);
+const d9 = M.decodeCapture(wire2([record(p65, { flags: 1 << 3 })]), 2);   // valid_bits = 1
+ok(d9.frames.length === 1 && d9.frames[0].data === 0x3333,
+   `valid_bits=1 partial flush mis-decoded: ${JSON.stringify(d9.frames)}`);
+ok(d9.bursts.length === 1 && d9.bursts[0].valid_bits === 1,
+   `valid_bits not propagated onto the logical burst: ${JSON.stringify(d9.bursts[0] && d9.bursts[0].valid_bits)}`);
+
+// ---- 10. a valid_bits seam must reset the carry (firmware restarted the eMCU) -------
+// Burst A is an INCOMPLETE frame (last 2 data bits missing) flushed+restarted at idle
+// (valid_bits>0). Burst B happens to start with 2 bits then a separate frame. If the
+// carry bled across the seam, A's 30 frame bits + B's 2 bits would STITCH into a phantom
+// REG4=0x3333. The reset-on-seam must drop A's tail -> only B's real REG1 frame survives.
+const fb = mdioFrameBits(M.OP_W, 1, 4, 0x3333);       // 32 preamble + 32 frame
+const aBits = fb.slice(0, 62);                         // preamble + 30/32 frame bits (incomplete)
+const bBits = fb.slice(62).concat(mdioFrameBits(M.OP_W, 7, 1, 0x1234));  // the 2 missing bits + a clean frame
+const d10 = M.decodeCapture(wire2([
+  record(bitsToBytes(aBits), { flags: (62 % 8) << 3 }),  // valid_bits = 6 -> restart seam
+  record(bitsToBytes(bBits)),
+]), 2);
+ok(d10.frames.length === 1 && d10.frames[0].regad === 1 && d10.frames[0].data === 0x1234,
+   `valid_bits seam not reset -> phantom stitch: ${JSON.stringify(d10.frames.map(f => ({ r: f.regad, d: f.data })))}`);
+
 console.log(`${pass} passed, ${fail} failed`);
 console.log(fail === 0 ? '\n✅ ALL MDIO CODEC TESTS PASSED' : `\n❌ ${fail} FAILURE(S)`);
 process.exit(fail === 0 ? 0 : 1);
