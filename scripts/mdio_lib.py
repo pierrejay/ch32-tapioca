@@ -37,6 +37,19 @@ def bytes_to_bits(bs):
     return bits
 
 
+def burst_to_bits(payload, valid_bits=0):
+    """Like bytes_to_bits, but the LAST byte contributes only `valid_bits` MSBs when the
+    firmware flushed a mid-byte partial at idle (valid_bits 1..7; 0 = all bytes complete).
+    Lets a non-byte-aligned stop (clock glitch / >32-bit preamble) decode exactly, with no
+    1..7 phantom bits shifting the frame."""
+    if not payload or not valid_bits:
+        return bytes_to_bits(payload)
+    bits = bytes_to_bits(payload[:-1])
+    last = payload[-1]
+    bits += [(last >> (7 - i)) & 1 for i in range(valid_bits)]   # top valid_bits, MSB-first
+    return bits
+
+
 def _bval(bits):
     v = 0
     for b in bits:
@@ -44,8 +57,11 @@ def _bval(bits):
     return v
 
 
-def decode_bits(bits):
-    """Yield Clause-22 frames found in a bit list (preamble resync)."""
+def decode_bits_pos(bits):
+    """Yield (frame, end_index) for each Clause-22 frame (preamble resync). end_index
+    is the bit offset just past the frame - the caller uses it to carry the unconsumed
+    tail across a transport-burst boundary (MDIO self-frames on its >=32-bit preamble,
+    so a frame split by BURST_MAX must still decode; see decode_stream)."""
     n = len(bits)
     i = 0
     ones = 0
@@ -65,12 +81,40 @@ def decode_bits(bits):
                 # Conservative "no slave drove the read" detector: on a pulled-up MDIO
                 # line, a missing read response appears as TA=11 + DATA=0xffff.
                 no_response = (op == OP_R and ta == 0b11 and data == 0xFFFF)
-                yield Frame(op, phyad, regad, ta, data, ones, no_response)
+                yield (Frame(op, phyad, regad, ta, data, ones, no_response), i + 32)
                 i += 32
                 ones = 0
                 continue
         ones = 0
         i += 1
+
+
+def decode_bits(bits):
+    """Yield Clause-22 frames found in a bit list (preamble resync)."""
+    for fr, _ in decode_bits_pos(bits):
+        yield fr
+
+
+class BitStream:
+    """Cross-burst frame hunter. feed() the bits of each successive transport burst;
+    it carries the unconsumed tail forward so a frame straddling the BURST_MAX cut
+    decodes whole. The carry is bounded (one preamble+frame) so pure-idle bursts can't
+    grow it without limit. reset() drops the carry (e.g. on an explicit loss seam)."""
+    CARRY_MAX = 80              # >= max preamble run we keep + a 32-bit frame
+
+    def __init__(self):
+        self._carry = []
+
+    def reset(self):
+        self._carry = []
+
+    def feed(self, bits):
+        buf = self._carry + list(bits)
+        end = 0
+        for fr, e in decode_bits_pos(buf):
+            end = e
+            yield fr
+        self._carry = buf[end:][-self.CARRY_MAX:]
 
 
 # ---- MMD-indirect (Clause-45 over Clause-22) folding -----------------------
@@ -211,8 +255,10 @@ def records_from_binary(data):
 FLAG_OVF_PIOC = 1
 FLAG_OVF_RAM = 2
 FLAG_CONTINUED = 4          # record cut at BURST_MAX; bit-contiguous with the next
+VALIDBITS_SHIFT = 3         # flags bits 3..5 = valid bits in the LAST byte (0 = all complete)
+VALIDBITS_MASK = 0x7
 
-LBurst = namedtuple("LBurst", "t_us dur_us onset_us flags payload")
+LBurst = namedtuple("LBurst", "t_us dur_us onset_us flags payload valid_bits")
 
 
 class BurstJoiner:
@@ -237,8 +283,11 @@ class BurstJoiner:
         self._flags |= rec.flags
         if rec.flags & FLAG_CONTINUED:
             return None
+        # valid_bits applies to the LAST byte and lives in the TERMINAL record's flags
+        # (continued records are always whole bytes -> 0), so read it from rec, not the OR.
+        vbits = (rec.flags >> VALIDBITS_SHIFT) & VALIDBITS_MASK
         out = LBurst(self._t0, self._dur, self._onset,
-                     self._flags & ~FLAG_CONTINUED, bytes(self._pay))
+                     self._flags & ~FLAG_CONTINUED, bytes(self._pay), vbits)
         self._pay = bytearray()
         self._t0 = None
         self._onset = 0

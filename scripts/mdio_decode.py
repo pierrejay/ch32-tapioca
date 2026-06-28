@@ -21,6 +21,7 @@ import mdio_lib as M
 
 def run_binary(data, raw):
     folder = M.MmdFolder()
+    stream = M.BitStream()                          # carries frames across burst cuts
     nframes = 0
     bursts = []                                     # (t_start, dur_us, nbytes)
     clk = []                                         # onset-based MDC clock estimates
@@ -40,13 +41,35 @@ def run_binary(data, raw):
         if lb.flags & (M.FLAG_OVF_PIOC | M.FLAG_OVF_RAM):
             print("    *** OVF (flags=0x%02X) ***" % lb.flags)
             folder.reset()
-        for fr in M.decode_bits(M.bytes_to_bits(lb.payload)):
+            stream.reset()                          # a loss seam breaks bit-contiguity
+        for fr in stream.feed(M.burst_to_bits(lb.payload, lb.valid_bits)):
             nframes += 1
             emit_frame(fr, folder, raw)
+        if lb.valid_bits:
+            stream.reset()                          # firmware flushed a partial + restarted the
+                                                    # eMCU -> next burst isn't bit-contiguous (keep
+                                                    # the folder: MMD reg13/14 spans transactions)
         print("    --- burst @%.3fs  %d B  %.0fus ---"
               % (lb.t_us / 1e6, len(lb.payload), lb.dur_us))
     print_stats(bursts, tot_bytes, nframes, ovf_pioc, ovf_ram, clk)
     return nframes
+
+
+def run_bits(data):
+    """Dump the raw sampled bit stream per burst - for debugging capture/timing when nothing
+       decodes as MDIO. A good Clause-22 frame shows a run of 1s (>=32-bit preamble) then 01
+       (ST). Garbled / phase-shifted samples show no clean preamble. The bit order is the
+       sniffer's sample order (MSB-first per byte), same as the normal decoder."""
+    n = 0
+    for lb in M.logical_bursts(M.records_from_binary(data)):
+        bits = M.burst_to_bits(lb.payload, lb.valid_bits)
+        s = "".join(str(b) for b in bits)
+        print("burst @%.3fs  %dB  %d bits (vbits=%d):\n  %s"
+              % (lb.t_us / 1e6, len(lb.payload), len(bits), lb.valid_bits, s))
+        n += 1
+    if not n:
+        print("no burst records (sniffer captured nothing decodable as records)")
+    return n
 
 
 def emit_frame(fr, folder, raw):
@@ -95,9 +118,14 @@ def main():
     ap.add_argument("file", nargs="?", help="capture file (default: stdin)")
     ap.add_argument("--raw", action="store_true",
                     help="print every raw Clause-22 frame (no MMD folding)")
+    ap.add_argument("--bits", action="store_true",
+                    help="dump the raw sampled bit stream per burst (debug: no MDIO decode)")
     args = ap.parse_args()
 
     data = open(args.file, "rb").read() if args.file else sys.stdin.buffer.read()
+    if args.bits:
+        run_bits(data)
+        return
     n = run_binary(data, args.raw)
     print("\n[decoded %d Clause-22 frames]" % n, file=sys.stderr)
 

@@ -35,6 +35,7 @@
   const REG_MMD_CTRL = 13, REG_MMD_DATA = 14;
   const ONSET_N = 8, ONSET_BITS = (ONSET_N - 1) * 8;
   const FLAG_OVF_PIOC = 1, FLAG_OVF_RAM = 2, FLAG_CONTINUED = 4;
+  const VALIDBITS_SHIFT = 3, VALIDBITS_MASK = 0x7;   // flags bits 3..5 = valid bits in last byte
 
   const hex4 = v => v.toString(16).toUpperCase().padStart(4, "0");
 
@@ -42,6 +43,16 @@
   function bytesToBits(bs) {
     const bits = [];
     for (const v of bs) for (const k of [7, 6, 5, 4, 3, 2, 1, 0]) bits.push((v >> k) & 1);
+    return bits;
+  }
+  // Like bytesToBits, but the LAST byte contributes only `validBits` MSBs when the firmware
+  // flushed a mid-byte partial at idle (1..7; 0 = all bytes complete). A non-byte-aligned stop
+  // then decodes exactly, with no 1..7 phantom bits shifting the frame.
+  function burstToBits(payload, validBits) {
+    if (!payload.length || !validBits) return bytesToBits(payload);
+    const bits = bytesToBits(payload.slice(0, -1));
+    const last = payload[payload.length - 1];
+    for (let i = 0; i < validBits; i++) bits.push((last >> (7 - i)) & 1);
     return bits;
   }
   function bval(bits, lo, hi) { let v = 0; for (let i = lo; i < hi; i++) v = (v << 1) | bits[i]; return v; }
@@ -71,6 +82,44 @@
       ones = 0; i++;
     }
     return out;
+  }
+
+  // Cross-burst frame hunter (mirrors mdio_lib.BitStream). feed() the bits of each
+  // successive transport burst; it carries the unconsumed tail forward so a frame
+  // straddling the BURST_MAX cut decodes whole. MDIO self-frames on its >=32-bit
+  // preamble, so transport-burst alignment must not gate decoding. The carry is
+  // bounded (one preamble+frame) so pure-idle bursts can't grow it; reset() drops it.
+  const BITSTREAM_CARRY_MAX = 80;
+  class BitStream {
+    constructor() { this._carry = []; }
+    reset() { this._carry = []; }
+    feed(bits) {
+      const buf = this._carry.concat(bits);
+      const n = buf.length;
+      const out = [];
+      let i = 0, ones = 0, end = 0;
+      while (i < n) {
+        if (buf[i] === 1) { ones++; i++; continue; }
+        if (ones >= 32 && i + 32 <= n) {
+          const f = i;
+          if (bval(buf, f, f + 2) === 0b01) {            // ST = 01
+            const op = bval(buf, f + 2, f + 4);
+            const ta = bval(buf, f + 14, f + 16);
+            const data = bval(buf, f + 16, f + 32);
+            // mirror decodeBits: a missing read response = TA=11 + DATA=0xffff
+            const noResponse = op === OP_R && ta === 0b11 && data === 0xFFFF;
+            out.push({
+              op, phyad: bval(buf, f + 4, f + 9),
+              regad: bval(buf, f + 9, f + 14), ta, data, preamble: ones, noResponse,
+            });
+            i += 32; ones = 0; end = i; continue;
+          }
+        }
+        ones = 0; i++;
+      }
+      this._carry = buf.slice(Math.max(end, n - BITSTREAM_CARRY_MAX));
+      return out;
+    }
   }
 
   // ---- MMD-indirect (Clause-45 over Clause-22) folding ---------------------
@@ -233,8 +282,10 @@
       this._dur += rec.dur_us;
       this._flags |= rec.flags;
       if (rec.flags & FLAG_CONTINUED) return null;
+      // valid_bits lives in the TERMINAL record's flags (continued records are whole bytes).
+      const validBits = (rec.flags >> VALIDBITS_SHIFT) & VALIDBITS_MASK;
       const out = { t_us: this._t0, dur_us: this._dur, onset_us: this._onset,
-                    flags: this._flags & ~FLAG_CONTINUED, payload: this._pay };
+                    flags: this._flags & ~FLAG_CONTINUED, payload: this._pay, valid_bits: validBits };
       this._reset();
       return out;
     }
@@ -265,20 +316,22 @@
     const { records, metas, losses } = recordsFromBinary(data, wire);
     const bursts = logicalBursts(records);
     const folder = new MmdFolder();
+    const stream = new BitStream();                 // carries frames across burst cuts
     const frames = [], events = [];
     for (const lb of bursts) {
-      for (const fr of decodeBits(bytesToBits(lb.payload))) {
+      for (const fr of stream.feed(burstToBits(lb.payload, lb.valid_bits))) {
         frames.push(fr);
         const [text, ev] = folder.feed(fr);
         if (ev) events.push(Object.assign({ text }, ev));
       }
-    }
+      if (lb.valid_bits) stream.reset();            // partial flushed + eMCU restarted -> next burst
+    }                                               // isn't bit-contiguous (keep the folder for MMD)
     return { frames, events, bursts, metas: metas.map(parseMeta), losses };
   }
 
   root.MDIO = {
     OP_R, OP_W, OP_NAME, DEVAD_NAME, FLAG_OVF_PIOC, FLAG_OVF_RAM, FLAG_CONTINUED,
-    hex4, bytesToBits, decodeBits, MmdFolder, cobsDecode, deframe, demuxV2, metaText,
+    hex4, bytesToBits, burstToBits, decodeBits, BitStream, MmdFolder, cobsDecode, deframe, demuxV2, metaText,
     parseRecord, recordsFromBinary, parseMeta, BurstJoiner, logicalBursts,
     onsetMdcKHz, decodeCapture,
   };
