@@ -31,7 +31,7 @@ import re
 import os
 
 # ---- opcode encoders: mnemonic -> (arity, fn(args:list[int]) -> word) --------
-# [V] = byte-verified against the ring blob; [M] = RISC8B manual only;
+# [V] = byte-verified against the WCH toolchain; [M] = RISC8B manual only;
 # [M+] = manual + corroborated by the independent andelf/pioc ISA table.
 ENC = {
     "DW":    (1, lambda a: a[0]),                       # [V] raw word
@@ -52,6 +52,12 @@ ENC = {
     "BTSC":  (2, lambda a: 0x5000 | (a[1] << 8) | a[0]),# [V]
     "BTSS":  (2, lambda a: 0x5800 | (a[1] << 8) | a[0]),# [M]
     "BS":    (2, lambda a: 0x4800 | (a[1] << 8) | a[0]),# [M]
+    "NOP":   (0, lambda _: 0x0000),                     # [V-IIC] LST C=0000
+    "CLRA":  (0, lambda _: 0x0004),                     # [V-IIC] LST C=0004
+    "ADDL":  (1, lambda a: 0x2C00 | a[0]),              # [V-IIC] LST ADDL 0xFF = 0x2CFF
+    "BC":    (2, lambda a: 0x4000 | (a[1] << 8) | a[0]),# [V-IIC] LST BC STATUS,1 = 0x4103 (= BS without bit 11)
+    "BP2F":  (2, lambda a: 0x00A0 | (a[0] << 3) | a[1]),# [V-IIC] drive bit b of data onto port o: OUT1 -> 0xB8..0xBF
+    "BG2F":  (2, lambda a: 0x00E0 | (a[0] << 3) | a[1]),# [V-IIC] sample port i into data bit b: IN1 -> 0xF8..0xFF
 }
 
 

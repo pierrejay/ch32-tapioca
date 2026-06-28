@@ -5,6 +5,7 @@
 //   - RUN_SNIFFER         : both datapaths + runtime !mode switch (the product)
 //   - RUN_CLOCKED_SNIFFER : clocked datapath standalone
 //   - RUN_RLE_SNIFFER     : rle datapath standalone
+//   - RUN_MDIO_MASTER     : active MDIO master driver (ASCII !read/!write/!print)
 #include "ch32_sdk.hpp"
 #include "led_blinker.hpp"
 #include "time.hpp"
@@ -29,6 +30,10 @@
 #include "rle_tick_test.hpp"
 #endif
 
+#ifdef RUN_MDIO_MASTER
+#include "mdio_master.hpp"
+#endif
+
 // Heartbeat LED
 #ifndef LED_GPIO_PORT
 #define LED_GPIO_PORT GPIOB
@@ -44,7 +49,11 @@
 #endif
 
 static constexpr uint32_t LED_FLASH_MS = 50;
+#ifdef RUN_MDIO_MASTER
+static constexpr uint32_t LED_PERIOD_MS = 0; // mdio_master uses LED for activity signaling
+#else
 static constexpr uint32_t LED_PERIOD_MS = 1000;
+#endif
 
 static UsbCdc     g_usb;
 static LedBlinker g_led(LED_GPIO_PORT,
@@ -62,6 +71,10 @@ static RleSniffer  g_rle(g_usb);
 
 #ifdef RUN_RLE_TICK_TEST
 static RleTickTest g_tick(g_rle); // bench: measure the blob's per-level tick cycles
+#endif
+
+#ifdef RUN_MDIO_MASTER
+static MdioMaster g_mdio(g_usb, &g_led); // active MDIO master driver (ASCII command layer + LED feedback)
 #endif
 
 #ifdef RUN_SNIFFER
@@ -176,6 +189,10 @@ int main(void)
     g_tick.begin(Time::millis());  // constant level on PA7 + real rle blob (TIM3 drain)
 #endif
 
+#ifdef RUN_MDIO_MASTER
+    g_mdio.begin(Time::millis());
+#endif
+
 #ifdef RUN_SNIFFER
     // Bring up ONLY the active datapath: begin() loads that mode's PIOC blob (the two
     // blobs are mutually exclusive on the shared eMCU) and, for rle, arms the TIM3
@@ -212,6 +229,10 @@ int main(void)
         g_tick.service(now);   // count caps on the held level, flip + report per phase
 #endif
 
+#ifdef RUN_MDIO_MASTER
+        g_mdio.service(now);   // drain RX -> parse !read/!write/!print -> transact -> respond
+#endif
+
 #ifdef RUN_SNIFFER
         if (g_mode == ModeCmd::CaptureMode::Rle) {
             g_rle.service(now);
@@ -224,13 +245,10 @@ int main(void)
         unifiedPollCommand();             // host !mode -> stop/reconfig/start, out of capture
 #endif
 
-        if ((int32_t)(now - nextLedFlashMs) >= 0)
+        if (LED_PERIOD_MS && (int32_t)(now - nextLedFlashMs) >= 0)
         {
             g_led.blink(LED_FLASH_MS);
             nextLedFlashMs = now + LED_PERIOD_MS;
-#if !defined(RUN_CLOCKED_SNIFFER) && !defined(RUN_RLE_SNIFFER) && !defined(RUN_SNIFFER) && !defined(RUN_RLE_TICK_TEST)
-            printf("Blink.\r\n");  // heartbeat text would pollute the binary capture stream
-#endif
         }
 
         g_led.tick();

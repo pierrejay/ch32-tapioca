@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""mdioctl - phytool-style CLI for the Tapioca MDIO master firmware.
+
+Speaks the device's ASCII wire protocol (!read / !write / !print) over its
+USB-CDC port and presents a phytool-compatible interface: same verbs, same
+output - minus the interface field (there's only one USB port, not a NIC).
+
+    mdioctl read  <phy>/<reg>           # print the 16-bit value, e.g. 0x1140
+    mdioctl write <phy>/<reg> <val>     # silent on success (like phytool)
+    mdioctl print <phy>                 # pretty-dump the IEEE 802.3 registers
+
+Numbers are base-0: 0x.. hex or plain decimal. The CDC port is resolved as
+--port, else $MDIO_PORT, else auto-detected when a single device is present.
+
+Errors (no PHY -> "noresp", stalled blob -> "timeout") print to stderr and exit
+non-zero, so it pipes/scripts like phytool does. Stdlib only (termios/os/select);
+the CDC port ignores the baud rate. See README.md - the wire grammar is plain
+ASCII, so any terminal can drive the bus by hand; mdioctl is just the wrapper.
+"""
+import argparse
+import glob
+import os
+import re
+import select
+import sys
+import termios
+import time
+
+
+# ---- CDC port plumbing -------------------------------------------------------
+def list_ports():
+    return sorted(glob.glob("/dev/cu.usbmodem*") +
+                  glob.glob("/dev/tty.usbmodem*") +
+                  glob.glob("/dev/ttyACM*"))
+
+
+def open_port(path):
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    a = termios.tcgetattr(fd)
+    a[0] = a[1] = a[3] = 0                        # iflag, oflag, lflag: raw
+    a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+    try:
+        a[4] = a[5] = termios.B115200             # ispeed/ospeed (CDC ignores it)
+    except AttributeError:
+        pass
+    a[6][termios.VMIN] = 0
+    a[6][termios.VTIME] = 0
+    termios.tcsetattr(fd, termios.TCSANOW, a)
+    return fd
+
+
+def pick_port(explicit):
+    if explicit:                                  # --port wins over $MDIO_PORT and auto
+        return explicit
+    env = os.environ.get("MDIO_PORT")
+    if env:
+        return env
+    ports = list_ports()
+    if not ports:
+        sys.exit("mdioctl: no /dev/cu.usbmodem* found - plug the master in")
+    if len(ports) > 1:
+        sys.exit("mdioctl: several ports, pass one with --port:\n  " + "\n  ".join(ports))
+    return ports[0]
+
+
+def flush_input(fd):
+    """Discard any pending bytes (e.g. the boot banner) before the first command."""
+    while select.select([fd], [], [], 0)[0]:
+        if not os.read(fd, 4096):
+            break
+
+
+def converse(fd, line, want=1, idle=0.12, maxwait=2.0):
+    """Send one command line; collect response lines until `want` of them arrive
+    or the device goes quiet for `idle`. '#' banner lines are dropped."""
+    os.write(fd, (line + "\n").encode())
+    start = time.time()
+    buf, lines = b"", []
+    while time.time() - start < maxwait:
+        if select.select([fd], [], [], idle)[0]:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                continue
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                s = raw.decode("latin1", "ignore").strip()
+                if s and not s.startswith("#"):
+                    lines.append(s)
+            if len(lines) >= want:
+                break
+        elif lines:
+            break                                 # idle gap after we got something
+    return lines
+
+
+# ---- wire response parsing ---------------------------------------------------
+RE_OK  = re.compile(r"^(read|write)\s+(\d+)/(\d+)\s+(?:0x([0-9A-Fa-f]+)|ok)$")
+RE_ERR = re.compile(r"^(read|write)\s+(\d+)/(\d+)\s+err\s+(\S+)$")
+
+
+def parse_resp(lines, verb, phy, reg):
+    """Find this transaction's reply among `lines`. Returns (value|None, err|None)."""
+    for s in lines:
+        m = RE_ERR.match(s)
+        if m and m.group(1) == verb and int(m.group(2)) == phy and int(m.group(3)) == reg:
+            return None, m.group(4)
+        m = RE_OK.match(s)
+        if m and m.group(1) == verb and int(m.group(2)) == phy and int(m.group(3)) == reg:
+            return (int(m.group(4), 16) if m.group(4) is not None else 0), None
+    return None, "no-response-from-device"
+
+
+def num(s, lo, hi, what):
+    try:
+        v = int(s, 0)
+    except ValueError:
+        sys.exit("mdioctl: %s '%s' is not a number" % (what, s))
+    if not (lo <= v <= hi):
+        sys.exit("mdioctl: %s %d out of range [%d..%d]" % (what, v, lo, hi))
+    return v
+
+
+def split_path(path, want_reg):
+    """phy/reg (want_reg) or just phy. Returns (phy, reg-or-None)."""
+    parts = path.split("/")
+    if want_reg:
+        if len(parts) != 2:
+            sys.exit("mdioctl: expected <phy>/<reg>, got '%s'" % path)
+        return num(parts[0], 0, 31, "phy"), num(parts[1], 0, 31, "reg")
+    if len(parts) != 1:
+        sys.exit("mdioctl: expected <phy>, got '%s'" % path)
+    return num(parts[0], 0, 31, "phy"), None
+
+
+# ---- IEEE 802.3 Clause-22 register pretty-print ------------------------------
+# Naming/decoding lives host-side (the device only returns raw values). We decode
+# the standardised registers 0..6 like phytool; vendor regs 7..31 stay raw.
+STD = {0: "BMCR", 1: "BMSR", 2: "PHYID1", 3: "PHYID2",
+       4: "ANAR", 5: "ANLPAR", 6: "ANER"}
+
+
+def dec_bmcr(v):
+    speed = {0b00: "10", 0b01: "100", 0b10: "1000"}.get(
+        (((v >> 6) & 1) << 1) | ((v >> 13) & 1), "?")
+    out = ["speed=%s" % speed,
+           "duplex=full" if v & (1 << 8) else "duplex=half",
+           "autoneg=on" if v & (1 << 12) else "autoneg=off"]
+    for bit, name in ((15, "reset"), (14, "loopback"), (11, "powerdown"),
+                      (10, "isolate"), (9, "restart-an")):
+        if v & (1 << bit):
+            out.append(name)
+    return " ".join(out)
+
+
+def dec_bmsr(v):
+    out = ["link=up" if v & (1 << 2) else "link=down",
+           "autoneg=" + ("complete" if v & (1 << 5) else "incomplete")]
+    if v & (1 << 4):
+        out.append("remote-fault")
+    if v & (1 << 1):
+        out.append("jabber")
+    caps = [n for bit, n in ((11, "10H"), (12, "10F"), (13, "100H"),
+                             (14, "100F"), (15, "100T4")) if v & (1 << bit)]
+    s = " ".join(out)
+    return s + ("  caps: " + " ".join(caps) if caps else "")
+
+
+def dec_aneg(v):                                  # ANAR / ANLPAR share the layout
+    adv = [n for bit, n in ((5, "10H"), (6, "10F"), (7, "100H"), (8, "100F"),
+                            (9, "100T4"), (10, "pause"), (11, "asym-pause"))
+           if v & (1 << bit)]
+    s = "adv: " + (" ".join(adv) if adv else "none")
+    if v & (1 << 13):
+        s += " remote-fault"
+    if v & (1 << 15):
+        s += " next-page"
+    return s
+
+
+def do_print(fd, phy):
+    """!print <phy> -> 32 raw reads on the device; pretty-dump them host-side."""
+    lines = converse(fd, "!print %d" % phy, want=32, idle=0.15, maxwait=4.0)
+    vals, errs = {}, {}
+    for s in lines:
+        m = RE_OK.match(s)
+        if m and m.group(1) == "read" and int(m.group(2)) == phy and m.group(4) is not None:
+            vals[int(m.group(3))] = int(m.group(4), 16)
+            continue
+        m = RE_ERR.match(s)
+        if m and m.group(1) == "read" and int(m.group(2)) == phy:
+            errs[int(m.group(3))] = m.group(4)
+
+    if not vals and not errs:
+        sys.exit("mdioctl: no response from device (wrong port, or firmware not in MDIO mode?)")
+
+    print("PHY %d - IEEE 802.3 Clause 22" % phy)
+    for reg in range(32):
+        name = STD.get(reg, "")
+        if reg in errs:
+            print("  %2d  %-7s ----    err %s" % (reg, name, errs[reg]))
+            continue
+        if reg not in vals:
+            print("  %2d  %-7s ----    (missing)" % (reg, name))
+            continue
+        v = vals[reg]
+        dec = ""
+        if reg == 0:
+            dec = dec_bmcr(v)
+        elif reg == 1:
+            dec = dec_bmsr(v)
+        elif reg == 3 and 2 in vals:              # compose the 32-bit PHY identifier
+            full = (vals[2] << 16) | v
+            dec = "id=0x%08x model=0x%02x rev=0x%x" % (full, (v >> 4) & 0x3f, v & 0xf)
+        elif reg in (4, 5):
+            dec = dec_aneg(v)
+        sep = "  " if dec else ""
+        print("  %2d  %-7s 0x%04x%s%s" % (reg, name, v, sep, dec))
+    return 1 if errs else 0                        # any reg that erred -> non-zero exit
+
+
+# ---- verbs -------------------------------------------------------------------
+def do_read(fd, phy, reg):
+    val, err = parse_resp(converse(fd, "!read %d/%d" % (phy, reg)), "read", phy, reg)
+    if err:
+        sys.stderr.write("mdioctl: read %d/%d: %s\n" % (phy, reg, err))
+        return 1
+    print("0x%04x" % val)                         # phytool: bare value on stdout
+    return 0
+
+
+def do_write(fd, phy, reg, val):
+    _, err = parse_resp(converse(fd, "!write %d/%d 0x%04x" % (phy, reg, val)),
+                        "write", phy, reg)
+    if err:
+        sys.stderr.write("mdioctl: write %d/%d: %s\n" % (phy, reg, err))
+        return 1
+    return 0                                       # phytool: silent on success
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="mdioctl", description="phytool-style CLI for the Tapioca MDIO master")
+    ap.add_argument("--port", help="CDC port (else $MDIO_PORT, else auto-detect)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("read", help="read one register: read <phy>/<reg>")
+    p.add_argument("path")
+    p = sub.add_parser("write", help="write one register: write <phy>/<reg> <val>")
+    p.add_argument("path")
+    p.add_argument("val")
+    p = sub.add_parser("print", help="pretty-dump a PHY's registers: print <phy>")
+    p.add_argument("phy")
+    args = ap.parse_args()
+
+    # Validate args BEFORE touching hardware, so a bad phy/reg/val reports the real
+    # problem (e.g. "phy 32 out of range") instead of "no port found".
+    if args.cmd == "read":
+        phy, reg = split_path(args.path, want_reg=True)
+    elif args.cmd == "write":
+        phy, reg = split_path(args.path, want_reg=True)
+        val = num(args.val, 0, 0xFFFF, "val")
+    else:  # print
+        phy, _ = split_path(args.phy, want_reg=False)
+
+    fd = open_port(pick_port(args.port))
+    flush_input(fd)
+
+    if args.cmd == "read":
+        rc = do_read(fd, phy, reg)
+    elif args.cmd == "write":
+        rc = do_write(fd, phy, reg, val)
+    else:  # print
+        rc = do_print(fd, phy)
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,4 @@
-// dashboard_smoke.mjs — headless smoke test for app/index.html.
+// dashboard_smoke.mjs — headless smoke test for app/web-sniffer/index.html.
 //
 //   node dashboard_smoke.mjs
 //
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const INDEX = resolve(HERE, '..', 'index.html');
+const INDEX = resolve(HERE, '..', 'web-sniffer', 'index.html');
 const CHROME = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',

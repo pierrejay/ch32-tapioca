@@ -1,10 +1,10 @@
 # ch32-tapioca
 
-**A sub-€1 USB logic analyzer for 1- and 2-wire buses, built on the CH32X035 PIOC.**
+**A sub-€1 USB logic analyzer & protocol driver for 1- and 2-wire buses, built on the CH32X035 PIOC.**
 
 Taps a logic-side bus signal and decodes it live in the browser. **Tested on CAN, DMX & MDIO.** Throughput supports
-~1 Mbps (non-clocked) / ~3 MHz (clocked). Signal *generation* (driving a bus / emulating protocols, not just
-listening) is planned.
+~1 Mbps (non-clocked) / ~3 MHz (clocked). A separate MDIO master build target can actively drive Clause-22 register
+reads/writes over the same USB-CDC plumbing.
 
 <table>
   <tr>
@@ -43,8 +43,8 @@ the CPU does the housekeeping and data transmission.
 
 It started as a need: an **ultra low-cost embedded USB↔MDIO bridge** to monitor/configure the
 Ethernet PHYs in an SPE media converter (two PHYs back-to-back). The PIOC turned out to be the perfect
-peripheral to passively follow an external clock, drive
-one, and parse/send data frames with tight timing, so the question became: *can it be turned into a general-purpose logic tool?*
+peripheral to passively follow an external clock, drive one, and capture/send data frames with tight
+timing, so the question became: *can it be turned into a general-purpose logic tool?*
 
 The PIOC is comparable to the RPi Pico's PIO, but:
 
@@ -57,9 +57,11 @@ So this is mostly a real-time engineering exercise: *how much useful capture can
 out of that?*
 
 Reference dev board used for testing: [WeAct Studio CH32X035 Core Board](https://github.com/WeActStudio/WeActStudio.CH32X035CoreBoard)
-(< €2).
+(< €2). The project builds with PlatformIO using the `ch32v` platform / `noneos-sdk` framework.
 
-## How it works
+## Sniffer
+
+### Working principle
 
 ```
   bus line
@@ -96,9 +98,7 @@ There's no kernel driver, decoding is a userspace lib in JS (browser) and Python
 - Timing resolution **±100 ns**.
 - Clocked capture is clean end-to-end to **~3 MHz**; a real MDIO bus runs ~1.5 MHz. (The clocked PIOC blob has passed isolated SPI-loopback tests at 6 MHz; ~3 MHz is the conservative product ceiling once CPU drain, USB framing and host decoding are included.)
 
-The project builds with PlatformIO using the `ch32v` platform / `noneos-sdk` framework.
-
-## Hardware
+### Setup
 
 - **Board:** `genericCH32X035F8U6` (QFN20). CH32X035 = 48 MHz RISC-V, USB-FS device.
 - **Tap pins** (logic-level side of the bus, not the differential CAN/RS485 pair):
@@ -111,7 +111,7 @@ The project builds with PlatformIO using the `ch32v` platform / `noneos-sdk` fra
   1. plug the board in while holding the BOOT button, and it enumerates as the WCH bootloader
   2. `pio run -t upload` (`upload_protocol = isp`) detects and flashes it, no debug probe
 
-## Build & run
+### Build & run
 
 Firmware (PlatformIO):
 
@@ -122,12 +122,12 @@ pio run -e sniffer -t upload  # the product: both modes + runtime !mode switch
 Then decode it in the browser, Chrome/Edge (Web Serial). The dashboard handles both capture modes and auto-detects the active one:
 
 ```sh
-open app/index.html           # then click "Connect" and pick the serial port
+open app/web-sniffer/index.html  # then click "Connect" and pick the serial port
 ```
 
 `scripts/` holds **offline** Python decoders (capture a file, then decode it) + a throughput probe, for CLI/CI, not live (the browser app is the realtime decoder).
 
-Build environments (`platformio.ini`):
+Main build environments (`platformio.ini`):
 
 | env | what |
 |---|---|
@@ -135,20 +135,18 @@ Build environments (`platformio.ini`):
 | `rle_sniffer` | RLE datapath only, with `DIAG` telemetry (re-validate a bus) |
 | `clocked_sniffer` | clocked datapath only, with `DIAG` telemetry |
 
-(`test_rle_tick` is a bench env that measures the RLE blob's per-level tick period, see `src/sniffer/rle_tick_test.hpp`.)
-
 Host tests: `bash app/test/run_all.sh` - the codec/framing/mode tests need Node + a C++ compiler; the dashboard smoke test additionally needs Chrome (Web Serial / CDP). No hardware required.
 
-## Protocols tested
+### Protocols tested
 
 | protocol | kind | notes / test setup |
 |---|---|---|
 | SPI | clocked | the dev loopback: SPI1 generates known waveforms (PA5/PA7 jumpered to the tap pins) to sanity-check capture without an external bus |
-| MDIO | clocked | the original use case: watch Linux monitor/control Ethernet PHYs. Sniffed on a USB↔SPE (10BASE-T1L) dongle, full Clause-22 + MMD decode. Active MDIO generation is planned, not in this capture firmware yet |
+| MDIO sniffing | clocked | the original use case: watch Linux monitor/control Ethernet PHYs. Sniffed on a USB↔SPE (10BASE-T1L) dongle, full Clause-22 + MMD decode |
 | CAN (classic, 1 Mbps) | RLE | a very cheap CAN analyzer. Tested against an ESP32 (TWAI) and a real bus with QDD motors through an SN65HVD230 CAN PHY |
 | DMX (250 kbps) | RLE | handy DMX-line debugger. Tested against an ESP32 (EZDMX) and real lighting drivers over an RS485 transceiver |
 
-## USB wire protocol and capture pipeline
+### USB wire protocol and capture pipeline
 
 Tapioca uses one USB-CDC link for both control and capture data. The host sends
 plain-text control commands such as `!mode rle` / `!mode clocked`; the device
@@ -166,32 +164,31 @@ edges/samples, preserves timing, reports loss boundaries, and lets the browser o
 scripts decode CAN/DMX/MDIO/etc.
 
 For the full byte-level format, examples, diagnostics, and the internal
-PIOC → RAM ring → USB pipeline, see [docs/usb-wire-api.md](docs/usb-wire-api.md).
+PIOC → RAM ring → USB pipeline, see [docs/sniffer-usb-wire-api.md](docs/sniffer-usb-wire-api.md).
 
-## Engineering notes
+### Engineering notes
 
 Bring-up notes, real-time constraints and the less obvious PIOC/USB traps are collected in
-[docs/tips-and-gotchas.md](docs/tips-and-gotchas.md).
+[docs/sniffer-tips-and-gotchas.md](docs/sniffer-tips-and-gotchas.md).
 
-## Scope and blind spots
+## MDIO driver
 
-This is not a full logic analyzer. It is an experiment in pushing a tiny MCU as
-far as it can go on useful, mainstream 1- and 2-wire buses - and seeing where that
-becomes a practical embedded building block.
+This project also features a separate **MDIO master driver** build target gated behind `-D RUN_MDIO_MASTER`.
+This is not a mode of the generic sniffer and it does not use the browser dashboard.
 
-The interesting niche: when a product already needs a small USB/UART/I2C/debug-side
-bridge, a CH32X035-class part can add protocol-aware capture/control for peanuts, in a
-3x3 mm package, instead of reaching for a larger RP2040/RP2350 MCU or an FPGA.
+The split is deliberate: MDIO requires the firmware to drive the preamble/address, release
+data line exactly at turnaround, keep clock running, sample the PHY response at the right
+phase, and detect a missing PHY from the TA bit. That makes a protocol-specific
+driver the right shape.
 
-Known limits:
+The user interface is [`mdioctl`](app/mdioctl/mdioctl), a small Python CLI modelled after
+`phytool`: same `read` / `write` / `print` style, without the Linux interface field
+because the selected USB-CDC device itself is the interface. But the driver talks plaintext
+ASCII so it's also useable standalone.
 
-- `clocked` has one fixed sampling phase today; doesn't yet cover rising,
-  falling, DDR/both-edge, and small sampling delays.
-- `clocked` captures only raw clock+data (no CS/direction pin)
-- `rle` is for clean NRZ timing; Manchester/PWM/biphase-style signals may need dedicated
-  recovery and might not fit the current idle model.
-- Long-idle squelch is tuned for the validated buses; very slow protocols may need
-  retuning or raw mode.
+PlatformIO environment : `mdio_master` (`mdio_master_stub` allows testing the ASCII path without a PIOC)
+
+Details: [docs/mdio-master.md](docs/mdio-master.md).
 
 ## Layout
 
@@ -200,23 +197,22 @@ Known limits:
 | `src/` | firmware (PlatformIO, `framework = noneos-sdk`) |
 | `src/sniffer/` | the two datapaths (`RleSniffer`, `ClockedSniffer`) + wire helpers (`mode_command`, `record_framer`) |
 | `src/{usb,hal,util}/` | USB-CDC, SDK + ISRs, ring/cobs/led/spi-gen |
-| `pioc/` | the PIOC capture blobs (`clocked_sniffer`, `rle_sniffer`) + `assemble.py` (a small native assembler for the PIOC `.ASM` files) |
-| `app/` | the Web Serial browser dashboard + its Node/C++ test suite |
-| `scripts/` | offline Python decoders (CLI/CI) + throughput probe + `diag_monitor` |
-| `docs/` | wire API notes, bring-up gotchas and screenshots used by the README |
+| `pioc/` | PIOC assembly files & binary blobs + `assemble.py` (a small native assembler) |
 | `ldscript/` | custom linker (reserves the top 4 KB of RAM for the PIOC program ROM) |
+| `app/web-sniffer/` | the Web Serial browser dashboard (single-file `index.html` + its `inline.mjs` builder) |
+| `app/mdioctl/` | `phytool`-style CLI for the MDIO master firmware |
+| `app/test/` | the shared Node/C++ host test suite + codec sources of truth |
+| `scripts/` | offline Python decoders (CLI/CI) + throughput probe + `diag_monitor` |
+| `docs/` | detailed notes and screenshots used by the README |
 
 ## Status & next
 
 **Done:** lossless capture of both clocked and clockless buses, validated end-to-end on real
-MDIO, CAN and DMX traffic; a runtime mode switch; a single binary wire protocol; and a
-browser dashboard that decodes it live, plus offline Python decoders for captured files.
+MDIO, CAN and DMX traffic; a runtime mode switch; a single binary wire protocol; a
+browser dashboard that decodes it live; offline Python decoders for captured files; and
+a separate Clause-22 MDIO master firmware with a `phytool`-style CLI.
 
 **Next:**
 
-- **Generation** - make the PIOC *drive* a bus, not just listen: the host sends a frame,
-  the device clocks it out. (This is the other half of the original MDIO-bridge idea: a
-  USB↔MDIO master that can read/write any PHY register.)
-- Refine the two measurement primitives (run-length vs clock-sampled) and push the
-  clocked ceiling.
-- More protocols (LIN, UART/RS485 auto-discovery, DALI, IR data...) - they fit the existing RLE/clocked split.
+- Extend MDIO driver with Clause-45
+- More protocols (DMX driver, LIN sniffer, RS485 autodiscovery, DALI...)

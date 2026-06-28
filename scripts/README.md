@@ -4,7 +4,7 @@ Python **test / validation** scripts for the sniffer — and a starting point if
 interface with the device from your own code. Most scripts have no third-party deps;
 `can_send.py` uses `python-can` to talk to real CAN hardware.
 
-The **browser app** (`../app/index.html`) is the primary, up-to-date decoder — these scripts are for CLI/CI/scripting, not the main UI.
+The **browser app** (`../app/web-sniffer/index.html`) is the primary, up-to-date decoder — these scripts are for CLI/CI/scripting, not the main UI. The **MDIO master** has its own `phytool`-style CLI in `../app/mdioctl/` (not here; this directory is sniffer-side tooling).
 
 | file | what |
 |---|---|

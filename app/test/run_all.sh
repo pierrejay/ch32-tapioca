@@ -6,9 +6,9 @@ cd "$(dirname "$0")"
 fail=0
 # the dashboard inlines test/cobs.js + test/mdio_codec.js — fail if it drifted from source
 echo "=== inline sync (index.html <- test/*.js) ==="
-node ../inline.mjs --check || fail=1
+node ../web-sniffer/inline.mjs --check || fail=1
 echo
-for t in cobs_test.js mdio_codec_test.js framer_test.js mode_command_test.js mdio_parity_test.js; do
+for t in cobs_test.js mdio_codec_test.js framer_test.js mode_command_test.js mdio_command_test.js mdio_parity_test.js; do
   echo "=== $t ==="
   node "$t" || fail=1
   echo

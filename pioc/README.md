@@ -1,4 +1,4 @@
-# pioc/ - the PIOC capture engines + their toolchain
+# pioc/ - the PIOC blobs + their toolchain
 
 The PIOC (WCH "eMCU", a RISC8B coprocessor) runs a tiny program we write in its
 own assembly. It has 2 bidirectional IO pins (IO0=PC18, IO1=PC19), a 33-byte
@@ -6,12 +6,14 @@ data-register file shared with the CPU (`SFR_DATA_REG0..31`, host-readable while
 it runs), edge-wait (`WAITB`) and bit instructions. This folder isolates that
 flow so the rest of the firmware just `#include`s a generated C blob.
 
-Two blobs live here, one per capture mode:
+Three PIOC blobs live here: two passive capture engines and one active MDIO master:
 
 - **`clocked_sniffer`**: follows an external clock (MDC/SCLK) and samples the data
   line at each edge (MDIO/SPI). Drained by `ClockedSniffer` in `../src/`.
 - **`rle_sniffer`**: no clock line: run-length-encodes the data line's transitions
   for unclocked / asynchronous NRZ buses (CAN/DMX). Drained by `RleSniffer`; the host recovers timing.
+- **`mdio_master`**: actively drives MDC/MDIO for Clause-22 register access. Drained
+  by `MdioMaster`; see `../docs/mdio-master.md`.
 
 ## Assembling a blob
 
@@ -110,10 +112,12 @@ or `HEAD & 29`, since HEAD's 256-wrap isn't aligned with 30.)
 single data-reg write is atomic w.r.t. the host, and publishing HEAD *after* the
 byte is committed means a host that sees `HEAD=N` knows slots `0..N-1` are stable.
 
-**Passive-tap safety:** the blob's first instruction is `CLR SFR_PORT_DIR`, forcing
-both PIOC IO pins to INPUT (`DIR=1`=output, `0`=input) — the eMCU can never drive
-the bus. The SPI loopback generator (`SpiGen`, bench-only) is the *only* thing that
-ever drives PA5/PA7; the passive build never configures it.
+**Passive-tap safety:** the sniffer blobs' first instruction is `CLR SFR_PORT_DIR`,
+forcing both PIOC IO pins to INPUT (`DIR=1`=output, `0`=input) — the eMCU can never
+drive the bus in passive capture builds. The SPI loopback generator (`SpiGen`,
+bench-only) is the *only* thing that ever drives PA5/PA7; the passive build never
+configures it. The `mdio_master` blob is the explicit exception: it is an active
+driver and intentionally drives PC18/PC19.
 
 **Indirect-addressing facts:** `MOVIA k` sets `SFR_INDIR_ADDR2`; `MOVA
 SFR_INDIR_PORT2` stores A then **auto-increments the pointer by 1** (group 2 only);

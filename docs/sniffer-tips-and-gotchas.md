@@ -63,3 +63,23 @@ Roughly:
 - CAN 1 Mbps: >8000 fps typical;
 - DMX: 44 Hz / 250 kbps is trivial;
 - clocked capture: clean to ~3 MHz.
+
+## Scope and blind spots
+
+This is not a full logic analyzer. It is an experiment in pushing a tiny MCU as
+far as it can go on useful, mainstream 1- and 2-wire buses - and seeing where that
+becomes a practical embedded building block.
+
+The interesting niche: when a product already needs a small USB/UART/I2C/debug-side
+bridge, a CH32X035-class part can add protocol-aware capture/control for peanuts, in a
+3x3 mm package, instead of reaching for a larger RP2040/RP2350 MCU or an FPGA.
+
+Known limits:
+
+- `clocked` has one fixed sampling phase today; doesn't yet cover rising,
+  falling, DDR/both-edge, and small sampling delays.
+- `clocked` captures only raw clock+data (no CS/direction pin)
+- `rle` is for clean NRZ timing; Manchester/PWM/biphase-style signals may need dedicated
+  recovery and might not fit the current idle model.
+- Long-idle squelch is tuned for the validated buses; very slow protocols may need
+  retuning or raw mode.
