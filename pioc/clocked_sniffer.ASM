@@ -35,6 +35,13 @@ MCU_START:
                     MOVIA SFR_DATA_REG0          ; INDIR_ADDR2 = 0x20 (ring slot 0)
 
 BYTE_LOOP:
+                    ; seed ACC with a sentinel bit (bit0). RCL rotates it up one slot per
+                    ; sample, so after k samples the seed sits at bit k -> the CPU can read
+                    ; ACC at idle and recover the partial-bit count (its highest set bit) to
+                    ; flush a mid-byte without loss. On the 8th sample the seed rotates out via
+                    ; carry, so a COMPLETE byte is bit-for-bit unchanged (ring stays identical).
+                    MOVL  0X01
+                    MOVA  ACC
                     ; --- 8 bits, unrolled, mid-bit sampling -------------------
                     WAITB WB_PORT_XOR0_1
                     WAITB WB_PORT_XOR0_0

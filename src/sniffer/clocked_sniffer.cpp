@@ -50,6 +50,17 @@ void ClockedSniffer::loadRingBlob()
     Delay_Ms(1);
 }
 
+// Restart the eMCU from MCU_START without re-copying the blob (it persists in PIOC SRAM).
+// Used after flushing a mid-byte partial at idle: the eMCU still holds those 1..7 bits in
+// ACC and would fold them into its next byte, so we reset it -> CLR HEAD + ring ptr + a
+// freshly seeded ACC. Cheap (no memcpy/GPIO); only ever runs out of capture, at an idle gap.
+void ClockedSniffer::restartPioc()
+{
+    R8_SYS_CFG |= RB_MST_RESET;
+    R8_SYS_CFG  = RB_MST_IO_EN0 | RB_MST_IO_EN1;
+    R8_SYS_CFG |= RB_MST_CLK_GATE;
+}
+
 // ---- lifecycle ------------------------------------------------------------
 void ClockedSniffer::begin(uint32_t nowMs)
 {
@@ -113,7 +124,10 @@ void ClockedSniffer::emitRecord(bool continued)
     uint16_t dur = (d > 0xFFFF) ? 0xFFFF : (uint16_t)d;
     rec[k++] = (uint8_t)(dur);            rec[k++] = (uint8_t)(dur >> 8);
     rec[k++] = (uint8_t)(burstOnset_);    rec[k++] = (uint8_t)(burstOnset_ >> 8);
-    uint8_t flags = (ovfPioc_ ? 1 : 0) | (ovfRam_ ? 2 : 0) | (continued ? 4 : 0);
+    // flags: bit0 PIOC ovf, bit1 RAM ovf, bit2 continued, bits3..5 = valid bits in the
+    // LAST byte (0 = all bytes complete; 1..7 = a mid-byte partial flushed at idle).
+    uint8_t flags = (ovfPioc_ ? 1 : 0) | (ovfRam_ ? 2 : 0) | (continued ? 4 : 0)
+                  | (uint8_t)((tailBits_ & 7) << 3);
     rec[k++] = flags;
     rec[k++] = (uint8_t)(burstN_);        rec[k++] = (uint8_t)(burstN_ >> 8);
     for (uint16_t i = 0; i < burstN_; i++) rec[k++] = burstBuf_[i];
@@ -189,11 +203,33 @@ void ClockedSniffer::service(uint32_t nowMs)
     }
     if (got) { burstLast_ = Time::micros(); sniffLastMs_ = nowMs; }
 
-    // finalize the open burst on an idle gap (>3 ms) or the continuous-traffic cap
-    if (burstOpen_ &&
-        ((uint32_t)(nowMs - sniffLastMs_) > 3 ||
-         (uint32_t)(Time::micros() - burstT0_) > BURST_TCAP_US)) {
-        emitRecord(false);                       // terminal: real gap / time cap
+    // finalize the open burst on an idle gap (>3 ms) or the continuous-traffic cap.
+    if (burstOpen_) {
+        bool idle = (uint32_t)(nowMs - sniffLastMs_) > 3;
+        bool tcap = (uint32_t)(Time::micros() - burstT0_) > BURST_TCAP_US;
+        if (idle) {
+            // Clock stopped -> the eMCU is blocked at a WAITB, so ACC (the seeded bit
+            // accumulator, DATA_REG30) is stable. Recover the in-flight partial byte: the
+            // seed sentinel's position = the count of valid bits captured since the last
+            // whole byte. Flush them MSB-justified with valid_bits, so a mid-byte stop
+            // (clock glitch / >32-bit preamble / dirty stop) NEVER bleeds 1..7 bits into
+            // the next burst and shifts the whole stream.
+            uint8_t acc = DR_[0x3E];                 // DATA_REG30 = ACC
+            uint8_t kbits = 0;
+            for (uint8_t v = acc; v >>= 1;) kbits++;  // position of the highest set bit (0..7)
+            if (kbits && burstN_ < BURST_MAX) {
+                burstBuf_[burstN_++] = (uint8_t)((acc & ((1u << kbits) - 1)) << (8 - kbits));
+                tailBits_ = kbits;
+            }
+            emitRecord(false);
+            tailBits_ = 0;
+            if (kbits) {                             // discard the flushed partial in the eMCU
+                restartPioc();                       // so it can't re-emit those bits next byte
+                sniffTail_ = DR_[RING_HEAD];         // re-sync to the reset ring (HEAD back to 0)
+            }
+        } else if (tcap) {
+            emitRecord(false);                       // continuous traffic: time-bound the record
+        }
     }
 
     // stage 2: drain RAM ring (encoded record bytes) -> USB verbatim, non-blocking.

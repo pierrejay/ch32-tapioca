@@ -52,6 +52,7 @@ private:
     static constexpr uint16_t ONSET_N       = 8;         // clock-estimate window
     void     emitRecord(bool continued);
     void     emitModeMarker();               // stage [MODE clocked wire=2] between records
+    void     restartPioc();                  // restart the eMCU (no re-memcpy): drop a flushed partial
     uint32_t modeHbMs_ = 0;                   // next [MODE] heartbeat time (ms)
 
     UsbCdc& usb_;
@@ -75,6 +76,7 @@ private:
     uint32_t burstLast_  = 0;                 // micros of last byte
     uint16_t burstOnset_ = 0;                 // micros 1st->ONSET_N-th byte (0 = n/a)
     bool     burstOpen_  = false;
+    uint8_t  tailBits_   = 0;                 // valid bits in the last (flushed partial) byte; 0 = all complete
 
 #ifdef DIAG
     // ---- telemetry (only with -D DIAG; off by default so the wire is pure capture).
