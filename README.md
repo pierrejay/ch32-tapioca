@@ -196,6 +196,7 @@ Details: [docs/mdio-master.md](docs/mdio-master.md).
 |---|---|
 | `src/` | firmware (PlatformIO, `framework = noneos-sdk`) |
 | `src/sniffer/` | the two datapaths (`RleSniffer`, `ClockedSniffer`) + wire helpers (`mode_command`, `record_framer`) |
+| `src/mdio/` | active MDIO master (`Mdio::Master`) + USB ASCII bridge (`Mdio::UsbBridge`) |
 | `src/{usb,hal,util}/` | USB-CDC, SDK + ISRs, ring/cobs/led/spi-gen |
 | `pioc/` | PIOC assembly files & binary blobs + `assemble.py` (a small native assembler) |
 | `ldscript/` | custom linker (reserves the top 4 KB of RAM for the PIOC program ROM) |

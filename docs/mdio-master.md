@@ -26,6 +26,15 @@ printf-over-CDC, LED, PIOC blob loader, the `assemble.py` toolchain) and special
 blob and (b) the protocol layer. One PlatformIO env per driver, exactly like the sniffer's
 `rle_sniffer` / `clocked_sniffer`.
 
+The firmware split is deliberately two-layered: `Mdio::Master` owns/arbitrates the
+physical MDIO bus, while `Mdio::UsbBridge` is only one client that exposes a USB
+pass-through command protocol. That keeps the path open for a later supervision
+build where the same chip can both pass host commands through to one or more PHYs
+and run firmware-side configuration sequences at boot or during operation. Those
+internal sequences can submit the same read/write requests as USB; the master
+serializes access and answers busy instead of letting two clients race the PIOC
+mailbox.
+
 ## Build and use
 
 Pin assignment is the same as the sniffer:
@@ -42,17 +51,18 @@ export MDIO_PORT=/dev/ttyACM0         # USB device
 ./mdioctl print 1
 ```
 
-The `mdio_master_stub` environment builds the same command layer with a canned backend 
-and no PIOC access, which keeps the ASCII parser/formatter testable without hardware.
+The `mdio_master_stub` environment builds the same USB ASCII bridge with a canned
+`Mdio::Master` backend and no PIOC access, which keeps the parser/formatter path
+testable without hardware.
 
 ## Wire API — ASCII line protocol, both directions
 
-No throughput is needed (one tiny synchronous transaction at a time), so we drop the binary
-COBS/0xFF envelope entirely: the only things that matter are useability and
-debuggability, and ASCII wins both. You can drive the bus by hand from any serial terminal;
-boot text is just lines the host ignores; USB-CDC already gives CRC + retransmit, so no
-application checksum. Grammar modelled on `phytool` (instant familiarity for PHY folks);
-Clause 45 would add a `<phy>:<dev>/<reg>` path form.
+No throughput is needed (one tiny serialized transaction at a time), so we drop the
+binary COBS/0xFF envelope entirely: the only things that matter are useability and
+debuggability, and ASCII wins both. You can drive the bus by hand from any serial
+terminal; boot text is just lines the host ignores; USB-CDC already gives CRC +
+retransmit, so no application checksum. Grammar modelled on `phytool` (instant
+familiarity for PHY folks); Clause 45 would add a `<phy>:<dev>/<reg>` path form.
 
 ```
 TX  (host -> device)
@@ -82,12 +92,17 @@ RX  (device -> host)            request-echoed -> self-correlating
 Staged, not finely interleaved (fine interleaving would re-introduce the CPU jitter we use the
 PIOC to avoid):
 
-- **CPU**: parse the ASCII command, assemble the Clause-22 bit frame, write the TX mailbox,
-  kick the blob, poll for done, read the RX mailbox, format the response.
+- **USB bridge (`Mdio::UsbBridge`)**: parse ASCII commands, submit one request at a
+  time, format the response, and run `!print` as a sequence of 32 reads.
+- **MDIO master (`Mdio::Master`)**: owns the bus and exposes one asynchronous slot
+  (`read`/`write` accept or return busy; `tick` publishes `Done`, `NoResp`, or
+  `Timeout` into the caller-owned response).
+- **CPU/PIOC mailbox path**: assemble the Clause-22 bit frame, write the TX mailbox,
+  kick the blob, poll for done from the main loop, and read the RX mailbox.
 - **PIOC blob** (`mdio_master.ASM`, SPI-master-like): generate MDC, drive the command bits,
   handle the turnaround (read: release + sample 16 on edges; write: drive 16), raise the
   TA-no-PHY flag. Executes a whole frame atomically (~64 clocks) then signals done.
 
-No PIOC ring buffer here (unlike the sniffer): strictly one transaction in flight, so two small
-fixed mailboxes suffice — TX descriptor (frame bits + op + bit-count) and RX descriptor
-(data16 + status).
+No PIOC ring buffer here (unlike the sniffer): the master serializes access to one
+transaction in flight, so two small fixed mailboxes suffice — TX descriptor (frame
+bits + op + bit-count) and RX descriptor (data16 + status).

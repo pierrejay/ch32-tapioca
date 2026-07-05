@@ -54,5 +54,5 @@ line at boot is informational; `mdioctl` skips it.
 
 ## Clause 45
 
-Not implemented yet (Clause-22 only). C45 is a later, CPU-side-only addition to the
+Not implemented yet (Clause-22 only). C45 is a later, firmware-side addition to the
 firmware; the CLI would gain a `<phy>:<dev>/<reg>` path form to match phytool.
