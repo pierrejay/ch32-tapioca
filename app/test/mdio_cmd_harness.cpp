@@ -1,4 +1,4 @@
-/* mdio_cmd_harness.cpp - drive src/mdio/mdio_command.hpp from the CLI for mdio_command_test.js.
+/* mdio_cmd_harness.cpp - drive src/mdio/mdio_bridge.hpp from the CLI for mdio_command_test.js.
  *
  *   ./mdio_cmd_harness parse "<line>"   -> "0 -"                  (invalid)
  *                                       -> "1 <op> <phy> <reg|-> <val|->"   (valid)
@@ -7,17 +7,19 @@
  */
 #include <stdio.h>
 #include <string.h>
-#include "../../src/mdio/mdio_command.hpp"
+#define private public
+#include "../../src/mdio/mdio_bridge.hpp"
+#undef private
 
 int main(int argc, char **argv) {
     if (argc >= 3 && strcmp(argv[1], "parse") == 0) {
-        MdioCmd::Command r = MdioCmd::parse(argv[2], strlen(argv[2]));
+        Mdio::UsbBridge::Command r = Mdio::UsbBridge::parse(argv[2], strlen(argv[2]));
         if (!r.valid) { printf("0 -\n"); return 0; }
-        const char *op = r.op == MdioCmd::Op::Read  ? "read"
-                       : r.op == MdioCmd::Op::Write ? "write" : "print";
+        const char *op = r.op == Mdio::UsbBridge::Op::Read  ? "read"
+                       : r.op == Mdio::UsbBridge::Op::Write ? "write" : "print";
         char reg[8] = "-", val[8] = "-";
-        if (r.op != MdioCmd::Op::Print) snprintf(reg, sizeof reg, "%u", r.reg);
-        if (r.op == MdioCmd::Op::Write) snprintf(val, sizeof val, "%u", r.val);
+        if (r.op != Mdio::UsbBridge::Op::Print) snprintf(reg, sizeof reg, "%u", r.reg);
+        if (r.op == Mdio::UsbBridge::Op::Write) snprintf(val, sizeof val, "%u", r.val);
         printf("1 %s %u %s %s\n", op, r.phy, reg, val);
         return 0;
     }

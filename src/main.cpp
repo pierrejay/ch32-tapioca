@@ -32,6 +32,7 @@
 
 #ifdef RUN_MDIO_MASTER
 #include "mdio_master.hpp"
+#include "mdio_bridge.hpp"
 #endif
 
 // Heartbeat LED
@@ -50,7 +51,7 @@
 
 static constexpr uint32_t LED_FLASH_MS = 50;
 #ifdef RUN_MDIO_MASTER
-static constexpr uint32_t LED_PERIOD_MS = 0; // mdio_master uses LED for activity signaling
+static constexpr uint32_t LED_PERIOD_MS = 0; // MDIO USB layer uses LED for activity signaling
 #else
 static constexpr uint32_t LED_PERIOD_MS = 1000;
 #endif
@@ -74,7 +75,8 @@ static RleTickTest g_tick(g_rle); // bench: measure the blob's per-level tick cy
 #endif
 
 #ifdef RUN_MDIO_MASTER
-static MdioMaster g_mdio(g_usb, &g_led); // active MDIO master driver (ASCII command layer + LED feedback)
+static Mdio::Master    g_mdio; // active MDIO bus owner; USB command layer lives below
+static Mdio::UsbBridge g_mdioUsb(g_usb, g_mdio, &g_led);
 #endif
 
 #ifdef RUN_SNIFFER
@@ -190,7 +192,12 @@ int main(void)
 #endif
 
 #ifdef RUN_MDIO_MASTER
-    g_mdio.begin(Time::millis());
+    g_mdio.begin();
+#ifdef MDIO_STUB
+    printf("# mdio-master ready (clause22, STUB - no PIOC)\r\n");   // '#' banner: host ignores
+#else
+    printf("# mdio-master ready (clause22)\r\n");                   // '#' banner: host ignores
+#endif
 #endif
 
 #ifdef RUN_SNIFFER
@@ -230,7 +237,8 @@ int main(void)
 #endif
 
 #ifdef RUN_MDIO_MASTER
-        g_mdio.service(now);   // drain RX -> parse !read/!write/!print -> transact -> respond
+        g_mdio.tick(now);      // progress the active MDIO request, if any
+        g_mdioUsb.tick();      // USB ASCII command layer -> submit/respond
 #endif
 
 #ifdef RUN_SNIFFER
