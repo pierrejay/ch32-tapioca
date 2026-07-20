@@ -30,23 +30,33 @@ void UsbBridge::blinkBad()
     if (led_) led_->blink(500, 100);
 }
 
-bool UsbBridge::startRead(uint8_t phy, uint8_t reg)
+bool UsbBridge::startRead(const Command& c)
 {
-    if (mdio_.read(phy, reg, resp_) != Master::Ok) return false;
-    pending_   = true;
-    activeOp_  = Op::Read;
-    activePhy_ = phy;
-    activeReg_ = reg;
+    Master::Result r = c.mmdAccess
+        ? mdio_.readMmd(c.phy, c.mmd, c.reg, resp_)
+        : mdio_.read(c.phy, (uint8_t)c.reg, resp_);
+    if (r != Master::Ok) return false;
+    pending_         = true;
+    activeOp_        = Op::Read;
+    activePhy_       = c.phy;
+    activeMmdAccess_ = c.mmdAccess;
+    activeMmd_       = c.mmd;
+    activeReg_       = c.reg;
     return true;
 }
 
-bool UsbBridge::startWrite(uint8_t phy, uint8_t reg, uint16_t val)
+bool UsbBridge::startWrite(const Command& c)
 {
-    if (mdio_.write(phy, reg, val, resp_) != Master::Ok) return false;
-    pending_   = true;
-    activeOp_  = Op::Write;
-    activePhy_ = phy;
-    activeReg_ = reg;
+    Master::Result r = c.mmdAccess
+        ? mdio_.writeMmd(c.phy, c.mmd, c.reg, c.val, resp_)
+        : mdio_.write(c.phy, (uint8_t)c.reg, c.val, resp_);
+    if (r != Master::Ok) return false;
+    pending_         = true;
+    activeOp_        = Op::Write;
+    activePhy_       = c.phy;
+    activeMmdAccess_ = c.mmdAccess;
+    activeMmd_       = c.mmd;
+    activeReg_       = c.reg;
     return true;
 }
 
@@ -54,13 +64,25 @@ void UsbBridge::emitActiveResponse()
 {
     const char* verb = (activeOp_ == Op::Read) ? "read" : "write";
     if (resp_.status == Master::Done) {
-        if (activeOp_ == Op::Read)
-            printf("read %u/%u 0x%04X\r\n", activePhy_, activeReg_, resp_.value);
-        else
-            printf("write %u/%u ok\r\n", activePhy_, activeReg_);
+        if (activeOp_ == Op::Read) {
+            if (activeMmdAccess_)
+                printf("read %u:%u/0x%04X 0x%04X\r\n", activePhy_, activeMmd_,
+                       activeReg_, resp_.value);
+            else
+                printf("read %u/%u 0x%04X\r\n", activePhy_, activeReg_, resp_.value);
+        } else {
+            if (activeMmdAccess_)
+                printf("write %u:%u/0x%04X ok\r\n", activePhy_, activeMmd_, activeReg_);
+            else
+                printf("write %u/%u ok\r\n", activePhy_, activeReg_);
+        }
     } else {
-        printf("%s %u/%u err %s\r\n", verb, activePhy_, activeReg_,
-               statusErr(resp_.status));
+        if (activeMmdAccess_)
+            printf("%s %u:%u/0x%04X err %s\r\n", verb, activePhy_, activeMmd_,
+                   activeReg_, statusErr(resp_.status));
+        else
+            printf("%s %u/%u err %s\r\n", verb, activePhy_, activeReg_,
+                   statusErr(resp_.status));
     }
 }
 
@@ -87,7 +109,12 @@ void UsbBridge::pollResponse()
     if (!printActive_ || pending_) return;
 
     if (printNextReg_ < 32) {
-        if (startRead(printPhy_, printNextReg_))
+        Command c;
+        c.valid = true;
+        c.op = Op::Read;
+        c.phy = printPhy_;
+        c.reg = printNextReg_;
+        if (startRead(c))
             printNextReg_++;
         return;
     }
@@ -103,8 +130,11 @@ void UsbBridge::handleLine(const char* line, uint16_t len)
 
     switch (c.op) {
     case Op::Read:
-        if (printActive_ || pending_ || !startRead(c.phy, c.reg)) {
-            printf("read %u/%u err busy\r\n", c.phy, c.reg);
+        if (printActive_ || pending_ || !startRead(c)) {
+            if (c.mmdAccess)
+                printf("read %u:%u/0x%04X err busy\r\n", c.phy, c.mmd, c.reg);
+            else
+                printf("read %u/%u err busy\r\n", c.phy, c.reg);
             blinkBad();
         } else {
             blinkOk();
@@ -112,15 +142,18 @@ void UsbBridge::handleLine(const char* line, uint16_t len)
         break;
 
     case Op::Write:
-        if (printActive_ || pending_ || !startWrite(c.phy, c.reg, c.val)) {
-            printf("write %u/%u err busy\r\n", c.phy, c.reg);
+        if (printActive_ || pending_ || !startWrite(c)) {
+            if (c.mmdAccess)
+                printf("write %u:%u/0x%04X err busy\r\n", c.phy, c.mmd, c.reg);
+            else
+                printf("write %u/%u err busy\r\n", c.phy, c.reg);
             blinkBad();
         } else {
             blinkOk();
         }
         break;
 
-    case Op::Print:
+    case Op::Print: {
         if (printActive_ || pending_) {
             emitPrintBusy(c.phy);
             blinkBad();
@@ -132,7 +165,12 @@ void UsbBridge::handleLine(const char* line, uint16_t len)
         printPhy_     = c.phy;
         printNextReg_ = 0;
         blinkOk();
-        if (startRead(printPhy_, printNextReg_))
+        Command r;
+        r.valid = true;
+        r.op = Op::Read;
+        r.phy = printPhy_;
+        r.reg = printNextReg_;
+        if (startRead(r))
             printNextReg_++;
         else {
             printActive_ = false;
@@ -140,6 +178,7 @@ void UsbBridge::handleLine(const char* line, uint16_t len)
             blinkBad();
         }
         break;
+    }
 
     default:
         blinkBad();

@@ -18,6 +18,10 @@ enum {                              // data-reg offsets - MUST match pioc/mdio_m
 static constexpr uint8_t  CTRL_READ = 0x01, CTRL_GO = 0x80;      // CTRL doorbell bits
 static constexpr uint8_t  ST_OK = 0x01, ST_NORESP = 0x80;        // STATUS values the blob writes
 static constexpr uint32_t MDIO_TIMEOUT_MS = 5;                   // blob runs in ~60 us; this guards a stall
+static constexpr uint8_t  REGCR = 0x0D;                          // Clause-22 MMD access control
+static constexpr uint8_t  ADDAR = 0x0E;                          // Clause-22 MMD address/data
+static constexpr uint16_t MMD_ADDR = 0x0000;                      // REGCR[15:14] = 00
+static constexpr uint16_t MMD_DATA = 0x4000;                      // REGCR[15:14] = 01, no post-inc
 
 namespace Mdio {
 
@@ -61,15 +65,26 @@ void Master::loadBlob()
 
 Master::Result Master::read(uint8_t phy, uint8_t reg, Response& resp)
 {
-    return submit(OpRead, phy, reg, 0, resp);
+    return submit(OpRead, phy, 0, reg, 0, resp);
 }
 
 Master::Result Master::write(uint8_t phy, uint8_t reg, uint16_t val, Response& resp)
 {
-    return submit(OpWrite, phy, reg, val, resp);
+    return submit(OpWrite, phy, 0, reg, val, resp);
 }
 
-Master::Result Master::submit(Op op, uint8_t phy, uint8_t reg, uint16_t val,
+Master::Result Master::readMmd(uint8_t phy, uint8_t mmd, uint16_t reg, Response& resp)
+{
+    return submit(OpReadMmd, phy, mmd, reg, 0, resp);
+}
+
+Master::Result Master::writeMmd(uint8_t phy, uint8_t mmd, uint16_t reg, uint16_t val,
+                                Response& resp)
+{
+    return submit(OpWriteMmd, phy, mmd, reg, val, resp);
+}
+
+Master::Result Master::submit(Op op, uint8_t phy, uint8_t mmd, uint16_t reg, uint16_t val,
                               Response& resp)
 {
     if (active_) return Busy;
@@ -80,9 +95,14 @@ Master::Result Master::submit(Op op, uint8_t phy, uint8_t reg, uint16_t val,
     active_    = true;
     started_   = false;
     op_        = op;
+    step_      = StepStart;
     phy_       = phy;
+    mmd_       = mmd;
     reg_       = reg;
     val_       = val;
+    wireRead_  = true;
+    wireReg_   = 0;
+    wireVal_   = 0;
     startedMs_ = 0;
     resp_      = &resp;
 
@@ -94,19 +114,20 @@ void Master::tick(uint32_t nowMs)
     if (!active_) return;
 
     if (!started_) {
-        started_ = true;
-        startedMs_ = nowMs;
+        startNextTransaction(nowMs);
 #ifdef MDIO_STUB
         // Hardware-free protocol gate (no PIOC): canned value echoes the address; phy 31
         // fakes a no-response so the error path is exercisable without hardware.
         if (phy_ == 0x1F) {
             finish(NoResp);
         } else {
-            finish(Done, op_ == OpRead ? (uint16_t)((phy_ << 8) | reg_) : 0);
+            uint16_t v = 0;
+            if (op_ == OpRead) v = (uint16_t)((phy_ << 8) | (reg_ & 0x1F));
+            else if (op_ == OpReadMmd) v = (uint16_t)(((mmd_ & 0x1F) << 11) ^ reg_);
+            finish(Done, v);
         }
         return;
 #else
-        startTransaction();
 #endif
     }
 
@@ -118,23 +139,99 @@ void Master::tick(uint32_t nowMs)
     }
 
     if (st == ST_NORESP) {
-        finish(NoResp);
+        completeTransaction(nowMs, NoResp, 0);
         return;
     }
 
     if (st != ST_OK) {
-        finish(Timeout);
+        completeTransaction(nowMs, Timeout, 0);
         return;
     }
 
-    if (op_ == OpRead) {
-        finish(Done, (uint16_t)((DR[DR_RES_H] << 8) | DR[DR_RES_L]));
-    } else {
-        finish(Done);
-    }
+    uint16_t value = wireRead_ ? (uint16_t)((DR[DR_RES_H] << 8) | DR[DR_RES_L]) : 0;
+    completeTransaction(nowMs, Done, value);
 #else
     (void)nowMs;
 #endif
+}
+
+void Master::startNextTransaction(uint32_t nowMs)
+{
+    started_ = false;
+
+    switch (op_) {
+    case OpRead:
+    case OpWrite:
+        wireRead_ = (op_ == OpRead);
+        wireReg_  = (uint8_t)(reg_ & 0x1F);
+        wireVal_  = val_;
+        step_     = StepDone;
+        break;
+
+    case OpReadMmd:
+    case OpWriteMmd:
+        switch (step_) {
+        case StepStart:
+            wireRead_ = false;
+            wireReg_  = REGCR;
+            wireVal_  = (uint16_t)(MMD_ADDR | (mmd_ & 0x1F));
+            step_     = StepMmdAddrMode;
+            break;
+        case StepMmdAddrMode:
+            wireRead_ = false;
+            wireReg_  = ADDAR;
+            wireVal_  = reg_;
+            step_     = StepMmdSetAddr;
+            break;
+        case StepMmdSetAddr:
+            wireRead_ = false;
+            wireReg_  = REGCR;
+            wireVal_  = (uint16_t)(MMD_DATA | (mmd_ & 0x1F));
+            step_     = StepMmdDataMode;
+            break;
+        case StepMmdDataMode:
+            wireRead_ = (op_ == OpReadMmd);
+            wireReg_  = ADDAR;
+            wireVal_  = val_;
+            step_     = StepMmdData;
+            break;
+        default:
+            step_ = StepDone;
+            break;
+        }
+        break;
+
+    default:
+        step_ = StepDone;
+        break;
+    }
+
+    if (step_ == StepDone && (op_ == OpReadMmd || op_ == OpWriteMmd)) return;
+    startTransaction();
+    started_ = true;
+    startedMs_ = nowMs;
+}
+
+void Master::completeTransaction(uint32_t nowMs, Status status, uint16_t value)
+{
+    started_ = false;
+
+    if (status != Done) {
+        finish(status);
+        return;
+    }
+
+    if (step_ == StepDone) {
+        finish(Done, value);
+        return;
+    }
+
+    if (step_ == StepMmdData) {
+        finish(Done, op_ == OpReadMmd ? value : 0);
+        return;
+    }
+
+    startNextTransaction(nowMs);
 }
 
 // ---- blob transaction --------------------------------------------------------
@@ -145,14 +242,14 @@ void Master::startTransaction()
 {
 #ifndef MDIO_STUB
     // MSB-first: ST(01) OP PHYAD(5) REGAD(5) TA DATA(16) = 32 bits
-    bool     isRead = (op_ == OpRead);
+    bool     isRead = wireRead_;
     uint32_t op     = isRead ? 0x2u : 0x1u;         // OP: 10 read / 01 write
     uint32_t ta     = isRead ? 0x0u : 0x2u;         // TA: write drives 10; read is released
     uint32_t frame = (0x1u << 30) | (op << 28)
                    | ((uint32_t)(phy_ & 0x1F) << 23)
-                   | ((uint32_t)(reg_ & 0x1F) << 18)
+                   | ((uint32_t)(wireReg_ & 0x1F) << 18)
                    | (ta << 16)
-                   | (isRead ? 0u : (uint32_t)val_);
+                   | (isRead ? 0u : (uint32_t)wireVal_);
     DR[DR_CMD0] = (uint8_t)(frame >> 24);
     DR[DR_CMD1] = (uint8_t)(frame >> 16);
     DR[DR_CMD2] = (uint8_t)(frame >> 8);

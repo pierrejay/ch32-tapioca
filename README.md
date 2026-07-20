@@ -3,8 +3,8 @@
 **A sub-€1 USB logic analyzer & protocol driver for 1- and 2-wire buses, built on the CH32X035 PIOC.**
 
 Taps a logic-side bus signal and decodes it live in the browser. **Tested on CAN, DMX & MDIO.** Throughput supports
-~1 Mbps (non-clocked) / ~3 MHz (clocked). A separate MDIO master build target can actively drive Clause-22 register
-reads/writes over the same USB-CDC plumbing.
+~1 Mbps (non-clocked) / ~3 MHz (clocked). A separate MDIO master build target can actively drive Clause-22 and
+MMD register reads/writes over the same USB-CDC plumbing.
 
 <table>
   <tr>
@@ -187,6 +187,8 @@ because the selected USB-CDC device itself is the interface. But the driver talk
 ASCII so it's also useable standalone.
 
 PlatformIO environment : `mdio_master` (`mdio_master_stub` allows testing the ASCII path without a PIOC)
+The same `phytool`-style syntax supports Clause-22 (`phy/reg`) and MMD indirect
+access (`phy:mmd/reg`), including `mdioctl print --mmd <mmd>`.
 
 Details: [docs/mdio-master.md](docs/mdio-master.md).
 
@@ -211,9 +213,10 @@ Details: [docs/mdio-master.md](docs/mdio-master.md).
 **Done:** lossless capture of both clocked and clockless buses, validated end-to-end on real
 MDIO, CAN and DMX traffic; a runtime mode switch; a single binary wire protocol; a
 browser dashboard that decodes it live; offline Python decoders for captured files; and
-a separate Clause-22 MDIO master firmware with a `phytool`-style CLI.
+a separate Clause-22 MDIO master firmware with MMD indirect access and a
+`phytool`-style CLI.
 
 **Next:**
 
-- Extend MDIO driver with Clause-45
+- Add native Clause-45 MDIO frames behind the existing `phy:mmd/reg` syntax
 - More protocols (DMX driver, LIN sniffer, RS485 autodiscovery, DALI...)

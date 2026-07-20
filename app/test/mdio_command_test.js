@@ -28,14 +28,21 @@ const P = [
   ['!write 1/4 6699',         '1 write 1 4 6699'],        // decimal value
   ['!write 0/0 0',            '1 write 0 0 0'],
   ['!write 2/3 0xFFFF',       '1 write 2 3 65535'],       // full 16-bit value
+  ['!read 1:31/0x0300',       '1 read 1:31 768 -'],       // MMD / Clause-45-style path
+  ['!read 0x1:0x1f/0x18f6',   '1 read 1:31 6390 -'],      // base-0 everywhere
+  ['!write 1:7/0x020f 0xabcd','1 write 1:7 527 43981'],   // MMD write
   ['!print 7',                '1 print 7 - -'],
   ['!print 0x1F',             '1 print 31 - -'],
   // ---- strict rejects ----
   ['!read 32/4',              '0 -'],                     // phy out of range (>31)
   ['!read 1/32',              '0 -'],                     // reg out of range (>31)
+  ['!read 1:32/0',            '0 -'],                     // MMD/devad out of range (>31)
+  ['!read 1:31/0x10000',      '0 -'],                     // MMD reg out of range (>16-bit)
   ['!write 1/4 0x10000',      '0 -'],                     // value out of range (>0xFFFF)
   ['!read 1',                 '0 -'],                     // missing /reg
   ['!read 1/',                '0 -'],                     // missing reg after '/'
+  ['!read 1:/0',              '0 -'],                     // missing MMD after ':'
+  ['!print 1:31',             '0 -'],                     // print stays Clause-22 PHY-only
   ['!print 1/4',              '0 -'],                     // print takes phy only, no /reg
   ['!write 1/4',              '0 -'],                     // write needs a value
   ['!read 1/4 5',             '0 -'],                     // trailing junk

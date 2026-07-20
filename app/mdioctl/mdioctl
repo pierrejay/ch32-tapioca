@@ -6,14 +6,20 @@ USB-CDC port and presents a phytool-compatible interface: same verbs, same
 output - minus the interface field (there's only one USB port, not a NIC).
 
     mdioctl read  <phy>/<reg>           # print the 16-bit value, e.g. 0x1140
+    mdioctl read  <phy>:<mmd>/<reg>     # read an MMD / Clause-45-style register
     mdioctl write <phy>/<reg> <val>     # silent on success (like phytool)
+    mdioctl write --verify <path> <val> # silent if write + exact readback succeed
     mdioctl print <phy>                 # pretty-dump the IEEE 802.3 registers
+    mdioctl print --mmd <mmd> <phy>     # dump an MMD register window
 
 Numbers are base-0: 0x.. hex or plain decimal. The CDC port is resolved as
 --port, else $MDIO_PORT, else auto-detected when a single device is present.
 
-Errors (no PHY -> "noresp", stalled blob -> "timeout") print to stderr and exit
-non-zero, so it pipes/scripts like phytool does. Stdlib only (termios/os/select);
+Writes also stay silent on success. With --verify, the CLI first waits for the
+device-side write OK, then reads the same register back and compares the exact
+value; only failures print to stderr. Errors (no PHY -> "noresp", stalled blob ->
+"timeout", verify mismatch) exit non-zero, so it pipes/scripts like phytool does.
+Stdlib only (termios/os/select);
 the CDC port ignores the baud rate. See README.md - the wire grammar is plain
 ASCII, so any terminal can drive the bus by hand; mdioctl is just the wrapper.
 """
@@ -95,19 +101,31 @@ def converse(fd, line, want=1, idle=0.12, maxwait=2.0):
 
 
 # ---- wire response parsing ---------------------------------------------------
-RE_OK  = re.compile(r"^(read|write)\s+(\d+)/(\d+)\s+(?:0x([0-9A-Fa-f]+)|ok)$")
-RE_ERR = re.compile(r"^(read|write)\s+(\d+)/(\d+)\s+err\s+(\S+)$")
+PATH_RE = r"(\d+)(?::(\d+))?/((?:0x)?[0-9A-Fa-f]+)"
+RE_OK  = re.compile(r"^(read|write)\s+" + PATH_RE + r"\s+(?:0x([0-9A-Fa-f]+)|ok)$")
+RE_ERR = re.compile(r"^(read|write)\s+" + PATH_RE + r"\s+err\s+(\S+)$")
 
 
-def parse_resp(lines, verb, phy, reg):
+def path_text(phy, mmd, reg):
+    return "%d:%d/0x%04x" % (phy, mmd, reg) if mmd is not None else "%d/%d" % (phy, reg)
+
+
+def resp_matches(m, verb, phy, mmd, reg):
+    if not m or m.group(1) != verb:
+        return False
+    rmmd = int(m.group(3)) if m.group(3) is not None else None
+    return int(m.group(2)) == phy and rmmd == mmd and int(m.group(4), 0) == reg
+
+
+def parse_resp(lines, verb, phy, mmd, reg):
     """Find this transaction's reply among `lines`. Returns (value|None, err|None)."""
     for s in lines:
         m = RE_ERR.match(s)
-        if m and m.group(1) == verb and int(m.group(2)) == phy and int(m.group(3)) == reg:
-            return None, m.group(4)
+        if resp_matches(m, verb, phy, mmd, reg):
+            return None, m.group(5)
         m = RE_OK.match(s)
-        if m and m.group(1) == verb and int(m.group(2)) == phy and int(m.group(3)) == reg:
-            return (int(m.group(4), 16) if m.group(4) is not None else 0), None
+        if resp_matches(m, verb, phy, mmd, reg):
+            return (int(m.group(5), 16) if m.group(5) is not None else 0), None
     return None, "no-response-from-device"
 
 
@@ -122,15 +140,24 @@ def num(s, lo, hi, what):
 
 
 def split_path(path, want_reg):
-    """phy/reg (want_reg) or just phy. Returns (phy, reg-or-None)."""
+    """phy/reg, phy:mmd/reg (want_reg), or just phy. Returns (phy, mmd-or-None, reg-or-None)."""
     parts = path.split("/")
     if want_reg:
         if len(parts) != 2:
-            sys.exit("mdioctl: expected <phy>/<reg>, got '%s'" % path)
-        return num(parts[0], 0, 31, "phy"), num(parts[1], 0, 31, "reg")
+            sys.exit("mdioctl: expected <phy>/<reg> or <phy>:<mmd>/<reg>, got '%s'" % path)
+        head = parts[0].split(":")
+        if len(head) == 1:
+            return num(head[0], 0, 31, "phy"), None, num(parts[1], 0, 31, "reg")
+        if len(head) == 2:
+            return (num(head[0], 0, 31, "phy"),
+                    num(head[1], 0, 31, "mmd"),
+                    num(parts[1], 0, 0xFFFF, "reg"))
+        sys.exit("mdioctl: expected <phy>/<reg> or <phy>:<mmd>/<reg>, got '%s'" % path)
     if len(parts) != 1:
         sys.exit("mdioctl: expected <phy>, got '%s'" % path)
-    return num(parts[0], 0, 31, "phy"), None
+    if ":" in parts[0]:
+        sys.exit("mdioctl: expected <phy>, got '%s'" % path)
+    return num(parts[0], 0, 31, "phy"), None, None
 
 
 # ---- IEEE 802.3 Clause-22 register pretty-print ------------------------------
@@ -184,12 +211,12 @@ def do_print(fd, phy):
     vals, errs = {}, {}
     for s in lines:
         m = RE_OK.match(s)
-        if m and m.group(1) == "read" and int(m.group(2)) == phy and m.group(4) is not None:
-            vals[int(m.group(3))] = int(m.group(4), 16)
+        if m and m.group(1) == "read" and int(m.group(2)) == phy and m.group(3) is None and m.group(5) is not None:
+            vals[int(m.group(4), 0)] = int(m.group(5), 16)
             continue
         m = RE_ERR.match(s)
-        if m and m.group(1) == "read" and int(m.group(2)) == phy:
-            errs[int(m.group(3))] = m.group(4)
+        if m and m.group(1) == "read" and int(m.group(2)) == phy and m.group(3) is None:
+            errs[int(m.group(4), 0)] = m.group(5)
 
     if not vals and not errs:
         sys.exit("mdioctl: no response from device (wrong port, or firmware not in MDIO mode?)")
@@ -219,22 +246,49 @@ def do_print(fd, phy):
     return 1 if errs else 0                        # any reg that erred -> non-zero exit
 
 
+def do_print_mmd(fd, phy, mmd, start, count):
+    """Host-side MMD dump: one firmware !read per register."""
+    end = start + count
+    print("PHY %d - MMD %d registers 0x%04x..0x%04x" % (phy, mmd, start, end - 1))
+    rc = 0
+    for reg in range(start, end):
+        path = path_text(phy, mmd, reg)
+        val, err = parse_resp(converse(fd, "!read %s" % path), "read", phy, mmd, reg)
+        if err:
+            print("  0x%04x  ----    err %s" % (reg, err))
+            rc = 1
+        else:
+            print("  0x%04x  0x%04x" % (reg, val))
+    return rc
+
+
 # ---- verbs -------------------------------------------------------------------
-def do_read(fd, phy, reg):
-    val, err = parse_resp(converse(fd, "!read %d/%d" % (phy, reg)), "read", phy, reg)
+def do_read(fd, phy, mmd, reg):
+    path = path_text(phy, mmd, reg)
+    val, err = parse_resp(converse(fd, "!read %s" % path), "read", phy, mmd, reg)
     if err:
-        sys.stderr.write("mdioctl: read %d/%d: %s\n" % (phy, reg, err))
+        sys.stderr.write("mdioctl: read %s: %s\n" % (path, err))
         return 1
     print("0x%04x" % val)                         # phytool: bare value on stdout
     return 0
 
 
-def do_write(fd, phy, reg, val):
-    _, err = parse_resp(converse(fd, "!write %d/%d 0x%04x" % (phy, reg, val)),
-                        "write", phy, reg)
+def do_write(fd, phy, mmd, reg, val, verify=False):
+    path = path_text(phy, mmd, reg)
+    _, err = parse_resp(converse(fd, "!write %s 0x%04x" % (path, val)),
+                        "write", phy, mmd, reg)
     if err:
-        sys.stderr.write("mdioctl: write %d/%d: %s\n" % (phy, reg, err))
+        sys.stderr.write("mdioctl: write %s: %s\n" % (path, err))
         return 1
+    if verify:
+        got, err = parse_resp(converse(fd, "!read %s" % path), "read", phy, mmd, reg)
+        if err:
+            sys.stderr.write("mdioctl: write %s verify: %s\n" % (path, err))
+            return 1
+        if got != val:
+            sys.stderr.write("mdioctl: write %s verify: readback 0x%04x != 0x%04x\n" %
+                             (path, got, val))
+            return 1
     return 0                                       # phytool: silent on success
 
 
@@ -243,34 +297,51 @@ def main():
         prog="mdioctl", description="phytool-style CLI for the Tapioca MDIO master")
     ap.add_argument("--port", help="CDC port (else $MDIO_PORT, else auto-detect)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("read", help="read one register: read <phy>/<reg>")
+    p = sub.add_parser("read", help="read one register: read <phy>/<reg> or <phy>:<mmd>/<reg>")
     p.add_argument("path")
-    p = sub.add_parser("write", help="write one register: write <phy>/<reg> <val>")
+    p = sub.add_parser("write", help="write one register; success is silent")
+    p.add_argument("--verify", action="store_true",
+                   help="read back and compare after writing; success is still silent")
     p.add_argument("path")
     p.add_argument("val")
-    p = sub.add_parser("print", help="pretty-dump a PHY's registers: print <phy>")
+    p = sub.add_parser("print", help="pretty-dump registers: print <phy> or print --mmd <mmd> <phy>")
+    p.add_argument("--mmd", help="dump one MMD/devad instead of Clause-22 registers")
+    p.add_argument("--start", help="first MMD register to dump (default: 0)")
+    p.add_argument("--count", help="number of MMD registers to dump (default: 32)")
     p.add_argument("phy")
     args = ap.parse_args()
 
     # Validate args BEFORE touching hardware, so a bad phy/reg/val reports the real
     # problem (e.g. "phy 32 out of range") instead of "no port found".
     if args.cmd == "read":
-        phy, reg = split_path(args.path, want_reg=True)
+        phy, mmd, reg = split_path(args.path, want_reg=True)
     elif args.cmd == "write":
-        phy, reg = split_path(args.path, want_reg=True)
+        phy, mmd, reg = split_path(args.path, want_reg=True)
         val = num(args.val, 0, 0xFFFF, "val")
     else:  # print
-        phy, _ = split_path(args.phy, want_reg=False)
+        phy, _, _ = split_path(args.phy, want_reg=False)
+        if args.mmd is None:
+            if args.start is not None or args.count is not None:
+                sys.exit("mdioctl: --start/--count require --mmd")
+            mmd = None
+            start = 0
+            count = 32
+        else:
+            mmd = num(args.mmd, 0, 31, "mmd")
+            start = num(args.start or "0", 0, 0xFFFF, "start")
+            count = num(args.count or "32", 1, 0x10000 - start, "count")
 
     fd = open_port(pick_port(args.port))
     flush_input(fd)
 
     if args.cmd == "read":
-        rc = do_read(fd, phy, reg)
+        rc = do_read(fd, phy, mmd, reg)
     elif args.cmd == "write":
-        rc = do_write(fd, phy, reg, val)
-    else:  # print
+        rc = do_write(fd, phy, mmd, reg, val, verify=args.verify)
+    elif mmd is None:  # print
         rc = do_print(fd, phy)
+    else:  # print --mmd
+        rc = do_print_mmd(fd, phy, mmd, start, count)
     sys.exit(rc)
 
 

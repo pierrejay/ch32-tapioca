@@ -4,6 +4,8 @@
 //
 //     !read  <phy>/<reg>            e.g.  !read 1/4      !read 0x1/0x4
 //     !write <phy>/<reg> <val16>    e.g.  !write 1/4 0x1A2B
+//     !read  <phy>:<mmd>/<reg16>    e.g.  !read 1:31/0x0300
+//     !write <phy>:<mmd>/<reg16> <val16>
 //     !print <phy>                  bulk-read regs 0..31
 //
 // Parsing is deliberately a private UsbBridge detail. Malformed lines never reach
@@ -34,7 +36,9 @@ private:
         bool     valid = false;
         Op       op    = Op::None;
         uint8_t  phy   = 0;        // 0..31
-        uint8_t  reg   = 0;        // 0..31 (unused for Print)
+        bool     mmdAccess = false;
+        uint8_t  mmd   = 0;        // 0..31 (MMD/devad, unused for Clause-22)
+        uint16_t reg   = 0;        // 0..31 for Clause-22, 0..0xffff for MMD
         uint16_t val   = 0;        // write data (unused for Read/Print)
     };
 
@@ -104,11 +108,18 @@ private:
         p = skipWs(p, end);
 
         uint32_t phy = 0, reg = 0, val = 0;
+        bool mmdAccess = false;
+        uint32_t mmd = 0;
         if (!parseUint(p, end, 31, phy)) return r;
         if (op != Op::Print) {
+            if (p < end && *p == ':') {
+                p++;
+                if (!parseUint(p, end, 31, mmd)) return r;
+                mmdAccess = true;
+            }
             if (p >= end || *p != '/') return r;
             p++;
-            if (!parseUint(p, end, 31, reg)) return r;
+            if (!parseUint(p, end, mmdAccess ? 0xFFFF : 31, reg)) return r;
         }
         if (op == Op::Write) {
             p = skipWs(p, end);
@@ -122,13 +133,15 @@ private:
         r.valid = true;
         r.op = op;
         r.phy = (uint8_t)phy;
-        r.reg = (uint8_t)reg;
+        r.mmdAccess = mmdAccess;
+        r.mmd = (uint8_t)mmd;
+        r.reg = (uint16_t)reg;
         r.val = (uint16_t)val;
         return r;
     }
 
-    bool startRead(uint8_t phy, uint8_t reg);
-    bool startWrite(uint8_t phy, uint8_t reg, uint16_t val);
+    bool startRead(const Command& c);
+    bool startWrite(const Command& c);
     void handleLine(const char* line, uint16_t len);
     void pollCommand();
     void pollResponse();
@@ -148,7 +161,9 @@ private:
     bool             pending_ = false;
     Op               activeOp_ = Op::Read;
     uint8_t          activePhy_ = 0;
-    uint8_t          activeReg_ = 0;
+    bool             activeMmdAccess_ = false;
+    uint8_t          activeMmd_ = 0;
+    uint16_t         activeReg_ = 0;
     bool             printActive_ = false;
     bool             printAllOk_ = true;
     uint8_t          printPhy_ = 0;

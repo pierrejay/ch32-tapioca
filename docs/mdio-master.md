@@ -4,7 +4,9 @@ Active-drive MDIO master for the CH32X035 (Tapioca). Where the sniffer is a pass
 protocol-agnostic capture engine, the driver actively drives the bus to communicate
 with an Ethernet PHY.
 
-Status: **functional Clause-22 master.** Clause 45 will be added next.
+Status: **functional Clause-22 master with MMD / Clause-45-style access through
+the standard REGCR/ADDAR indirect method.** Native Clause-45 frames can be added
+later behind the same user-facing syntax.
 
 ## Why protocol-specific firmware (not the sniffer's agnostic model)
 
@@ -48,8 +50,18 @@ cd app/mdioctl
 export MDIO_PORT=/dev/ttyACM0         # USB device
 ./mdioctl read 1/2
 ./mdioctl write 1/4 0x01e1
+./mdioctl read 1:31/0x0300
+./mdioctl write --verify 0:31/0x0302 0x3e80
+./mdioctl print --mmd 31 --start 0x0300 --count 16 1
 ./mdioctl print 1
 ```
+
+`mdioctl` follows `phytool`: successful writes are silent, including
+`write --verify`. The firmware line protocol still returns `write ... ok`; the
+CLI consumes that response and exits `0` if the operation succeeded. With
+`--verify`, success means the write was accepted, a follow-up read answered, and
+the exact 16-bit readback matched the requested value. Failures print to stderr
+and exit non-zero.
 
 The `mdio_master_stub` environment builds the same USB ASCII bridge with a canned
 `Mdio::Master` backend and no PIOC access, which keeps the parser/formatter path
@@ -61,23 +73,33 @@ No throughput is needed (one tiny serialized transaction at a time), so we drop 
 binary COBS/0xFF envelope entirely: the only things that matter are useability and
 debuggability, and ASCII wins both. You can drive the bus by hand from any serial
 terminal; boot text is just lines the host ignores; USB-CDC already gives CRC +
-retransmit, so no application checksum. Grammar modelled on `phytool` (instant
-familiarity for PHY folks); Clause 45 would add a `<phy>:<dev>/<reg>` path form.
+retransmit, so no application checksum. Grammar is modelled on `phytool`: C22 uses
+`<phy>/<reg>`, and MMD / Clause-45-style access uses `<phy>:<mmd>/<reg>`.
 
 ```
 TX  (host -> device)
   !read  <phy>/<reg>            e.g.  !read 1/4
   !write <phy>/<reg> <val16>    e.g.  !write 1/4 0x1A2B
+  !read  <phy>:<mmd>/<reg16>    e.g.  !read 1:31/0x0300
+  !write <phy>:<mmd>/<reg16> <val16>
   !print <phy>                  bulk-read regs 0..31
 
 RX  (device -> host)            request-echoed -> self-correlating
   read  <phy>/<reg> 0xVAL       e.g.  read 1/4 0x1A2B
   write <phy>/<reg> ok
+  read  <phy>:<mmd>/0xREG 0xVAL e.g.  read 1:31/0x0300 0x1234
+  write <phy>:<mmd>/0xREG ok
   <verb> <phy>/<reg> err <why>  e.g.  read 1/4 err noresp
 ```
 
-- **Numbers are base-0**: `4` or `0x4`, `6699` or `0x1A2B` (the CPU parses both). `phy`/`reg`
-  are 0..31 (5-bit), `val` is 0..0xFFFF (16-bit).
+- **Numbers are base-0**: `4` or `0x4`, `6699` or `0x1A2B` (the CPU parses both).
+  C22 `phy`/`reg` and MMD `mmd` are 0..31; MMD `reg` and `val` are 16-bit.
+- **MMD access is currently indirect over Clause 22**: the master serializes the
+  REGCR (`0x0D`) / ADDAR (`0x0E`) sequence internally, so no USB or firmware
+  client can interleave a command in the middle and corrupt the MMD address latch.
+- **Writes and `noresp`**: a Clause-22 write has no PHY-driven turnaround phase,
+  so a raw write can only report that the master emitted the frame. `mdioctl
+  write --verify` adds a readback, which can detect `noresp` and value mismatch.
 - **`!print` is device-side bulk read but emits RAW values** — the same `read phy/reg 0xVAL`
   lines as a single read, so the host has one parser and we save 31 USB round-trips. Register
   **naming** (BMCR, BMSR, …) stays host-side: the device serves primitives, the host interprets
@@ -95,8 +117,8 @@ PIOC to avoid):
 - **USB bridge (`Mdio::UsbBridge`)**: parse ASCII commands, submit one request at a
   time, format the response, and run `!print` as a sequence of 32 reads.
 - **MDIO master (`Mdio::Master`)**: owns the bus and exposes one asynchronous slot
-  (`read`/`write` accept or return busy; `tick` publishes `Done`, `NoResp`, or
-  `Timeout` into the caller-owned response).
+  (`read`/`write`/`readMmd`/`writeMmd` accept or return busy; `tick` publishes
+  `Done`, `NoResp`, or `Timeout` into the caller-owned response).
 - **CPU/PIOC mailbox path**: assemble the Clause-22 bit frame, write the TX mailbox,
   kick the blob, poll for done from the main loop, and read the RX mailbox.
 - **PIOC blob** (`mdio_master.ASM`, SPI-master-like): generate MDC, drive the command bits,

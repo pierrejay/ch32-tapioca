@@ -39,6 +39,8 @@ public:
     void begin();                   // load the blob, init MDC/MDIO pins + MDC clock
     Result read(uint8_t phy, uint8_t reg, Response& resp);
     Result write(uint8_t phy, uint8_t reg, uint16_t val, Response& resp);
+    Result readMmd(uint8_t phy, uint8_t mmd, uint16_t reg, Response& resp);
+    Result writeMmd(uint8_t phy, uint8_t mmd, uint16_t reg, uint16_t val, Response& resp);
     void tick(uint32_t nowMs);      // progress the active request, if any
     bool busy() const { return active_; }
 
@@ -46,19 +48,38 @@ private:
     enum Op : uint8_t {
         OpRead,
         OpWrite,
+        OpReadMmd,
+        OpWriteMmd,
+    };
+
+    enum Step : uint8_t {
+        StepStart,
+        StepMmdAddrMode,
+        StepMmdSetAddr,
+        StepMmdDataMode,
+        StepMmdData,
+        StepDone,
     };
 
     void loadBlob();                // GPIO (AF_PP) + memcpy blob -> PIOC SRAM + start the eMCU
-    Result submit(Op op, uint8_t phy, uint8_t reg, uint16_t val, Response& resp);
+    Result submit(Op op, uint8_t phy, uint8_t mmd, uint16_t reg, uint16_t val,
+                  Response& resp);
+    void startNextTransaction(uint32_t nowMs);
     void startTransaction();
+    void completeTransaction(uint32_t nowMs, Status status, uint16_t value);
     void finish(Status status, uint16_t value = 0);
 
     bool      active_    = false;
     bool      started_   = false;
     Op        op_        = OpRead;
+    Step      step_      = StepStart;
     uint8_t   phy_       = 0;
-    uint8_t   reg_       = 0;
+    uint8_t   mmd_       = 0;
+    uint16_t  reg_       = 0;
     uint16_t  val_       = 0;
+    bool      wireRead_  = true;
+    uint8_t   wireReg_   = 0;
+    uint16_t  wireVal_   = 0;
     uint32_t  startedMs_ = 0;
     Response* resp_      = nullptr;
 };
