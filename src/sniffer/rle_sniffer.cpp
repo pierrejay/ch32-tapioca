@@ -235,7 +235,7 @@ void RleSniffer::begin(uint32_t nowMs)
     // periodic heartbeat (service()) is idle-gated to avoid tearing a frame, which would
     // otherwise defer the first [MODE rle] until the first bus idle gap - so the pill
     // lagged whenever the bus had traffic at switch time. Safe here: capture just
-    // (re)started, ring empty, no frame in flight, main.cpp already wrote the 0xFD seam. 
+    // (re)started, ring empty, no frame in flight, main_sniffer.cpp already wrote the 0xFD seam.
     modeHbMs_ = nowMs + 1000;
     emitModeMarker();
 #endif

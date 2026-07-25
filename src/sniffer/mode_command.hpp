@@ -6,7 +6,7 @@
 //     !mode <rle|clocked>\n
 //
 // The main loop accumulates a line and calls ModeCmd::parse(); on a valid command that
-// changes the active mode it runs the stop->seam->reconfig->start sequence (main.cpp,
+// changes the active mode it runs the stop->seam->reconfig->start sequence (main_sniffer.cpp,
 // dual-instance selector). Parsing is strict: a malformed line - or ANY trailing token -
 // leaves valid=false, so line noise can never trigger a reconfig.
 //

@@ -196,7 +196,8 @@ Details: [docs/mdio-master.md](docs/mdio-master.md).
 
 | path | what |
 |---|---|
-| `src/` | firmware (PlatformIO, `framework = noneos-sdk`) |
+| `src/` | firmware, one `main_*.cpp` per use case: `main_sniffer`, `main_mdio`, `main_tick_test` (each gated on its env's `RUN_*` flag, so exactly one defines `main()` per build) |
+| `src/common/` | shared board layer: USB-CDC + LED instances, clock/timebase bring-up, printf-over-CDC (`board.*`) |
 | `src/sniffer/` | the two datapaths (`RleSniffer`, `ClockedSniffer`) + wire helpers (`mode_command`, `record_framer`) |
 | `src/mdio/` | active MDIO master (`Mdio::Master`) + USB ASCII bridge (`Mdio::UsbBridge`) |
 | `src/{usb,hal,util}/` | USB-CDC, SDK + ISRs, ring/cobs/led/spi-gen |

@@ -136,7 +136,7 @@ private:
     // loopHz vs pktHz: loopHz ~ pktHz => the main loop is slow (something blocks the
     // re-arm); loopHz >> pktHz => loop fast but the single-buffer EP delivers few/s.
     uint32_t          loopCalls_ = 0;        // service() calls = main-loop iterations
-    // avg us in service() per [T] window, fed by main.cpp via recordTiming().
+    // avg us in service() per [T] window, fed by main_sniffer.cpp via recordTiming().
     uint32_t          svcSum_  = 0;
 
     // firehose bound: count consecutive >=128 continuation bytes; below
