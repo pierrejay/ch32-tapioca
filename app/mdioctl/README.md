@@ -82,10 +82,13 @@ protocol over CDC, so **any terminal works** — handy for debugging:
 !read  <phy>:<mmd>/<reg>    ->  read  <phy>:<mmd>/0xRRRR 0xXXXX | read  <phy>:<mmd>/0xRRRR err <why>
 !write <phy>:<mmd>/<reg> <val> -> write <phy>:<mmd>/0xRRRR ok   | write <phy>:<mmd>/0xRRRR err <why>
 !print <phy>                ->  32x  read <phy>/<reg> 0xXXXX
+<invalid command>           ->  err invalid
 ```
 
 e.g. `screen /dev/cu.usbmodemXXXX`, then type `!read 1/2`. The `#`-prefixed banner
-line at boot is informational; `mdioctl` skips it.
+line at boot is informational; `mdioctl` skips it. Over-long input is rejected as
+one complete line through the next CR/LF, so its suffix is never interpreted.
+`mdioctl` reports the resulting `err invalid` directly and exits non-zero.
 
 ## Clause 45 / MMD
 

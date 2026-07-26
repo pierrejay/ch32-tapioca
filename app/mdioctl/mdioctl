@@ -102,8 +102,9 @@ def converse(fd, line, want=1, idle=0.12, maxwait=2.0):
 
 # ---- wire response parsing ---------------------------------------------------
 PATH_RE = r"(\d+)(?::(\d+))?/((?:0x)?[0-9A-Fa-f]+)"
-RE_OK  = re.compile(r"^(read|write)\s+" + PATH_RE + r"\s+(?:0x([0-9A-Fa-f]+)|ok)$")
-RE_ERR = re.compile(r"^(read|write)\s+" + PATH_RE + r"\s+err\s+(\S+)$")
+RE_OK          = re.compile(r"^(read|write)\s+" + PATH_RE + r"\s+(?:0x([0-9A-Fa-f]+)|ok)$")
+RE_ERR         = re.compile(r"^(read|write)\s+" + PATH_RE + r"\s+err\s+(\S+)$")
+RE_GENERIC_ERR = re.compile(r"^err\s+(\S+)$")
 
 
 def path_text(phy, mmd, reg):
@@ -119,6 +120,7 @@ def resp_matches(m, verb, phy, mmd, reg):
 
 def parse_resp(lines, verb, phy, mmd, reg):
     """Find this transaction's reply among `lines`. Returns (value|None, err|None)."""
+    generic_err = None
     for s in lines:
         m = RE_ERR.match(s)
         if resp_matches(m, verb, phy, mmd, reg):
@@ -126,7 +128,10 @@ def parse_resp(lines, verb, phy, mmd, reg):
         m = RE_OK.match(s)
         if resp_matches(m, verb, phy, mmd, reg):
             return (int(m.group(5), 16) if m.group(5) is not None else 0), None
-    return None, "no-response-from-device"
+        m = RE_GENERIC_ERR.match(s)
+        if m:
+            generic_err = m.group(1)
+    return None, generic_err or "no-response-from-device"
 
 
 def num(s, lo, hi, what):
@@ -210,6 +215,9 @@ def do_print(fd, phy):
     lines = converse(fd, "!print %d" % phy, want=32, idle=0.15, maxwait=4.0)
     vals, errs = {}, {}
     for s in lines:
+        m = RE_GENERIC_ERR.match(s)
+        if m:
+            sys.exit("mdioctl: print %d: %s" % (phy, m.group(1)))
         m = RE_OK.match(s)
         if m and m.group(1) == "read" and int(m.group(2)) == phy and m.group(3) is None and m.group(5) is not None:
             vals[int(m.group(4), 0)] = int(m.group(5), 16)

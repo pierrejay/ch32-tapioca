@@ -90,10 +90,15 @@ RX  (device -> host)            request-echoed -> self-correlating
   read  <phy>:<mmd>/0xREG 0xVAL e.g.  read 1:31/0x0300 0x1234
   write <phy>:<mmd>/0xREG ok
   <verb> <phy>/<reg> err <why>  e.g.  read 1/4 err noresp
+  err invalid                     malformed or over-long command
 ```
 
 - **Numbers are base-0**: `4` or `0x4`, `6699` or `0x1A2B` (the CPU parses both).
   C22 `phy`/`reg` and MMD `mmd` are 0..31; MMD `reg` and `val` are 16-bit.
+- **Invalid input never reaches the bus**: malformed commands return `err invalid`.
+  If a line exceeds the 48-byte receive buffer, the bridge rejects the entire line
+  and ignores every remaining byte through the next CR/LF; a valid-looking suffix
+  can therefore never become a second command.
 - **MMD access is currently indirect over Clause 22**: the master serializes the
   REGCR (`0x0D`) / ADDAR (`0x0E`) sequence internally, so no USB or firmware
   client can interleave a command in the middle and corrupt the MMD address latch.

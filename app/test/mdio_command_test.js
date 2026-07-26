@@ -57,6 +57,18 @@ const P = [
 for (const [line, want] of P)
   ok(run('parse', line) === want, `parse "${line}" -> "${run('parse', line)}" want "${want}"`);
 
+// ---- line framing / overflow safety -----------------------------------------
+// Once the 48-byte buffer overflows, the entire physical line is rejected. A valid
+// !write suffix on that same line must never be surfaced as a second command.
+const longPrefix = 'x'.repeat(48);
+ok(run('frame', longPrefix + '!write 0/0 1\n') === 'invalid',
+   'over-long line rejects a valid write suffix');
+ok(run('frame', longPrefix + 'x\r\n') === 'invalid',
+   'CRLF emits exactly one invalid event');
+ok(run('frame', longPrefix + '!write 0/0 1\n!read 1/2\n') ===
+   'invalid\nready:!read 1/2',
+   'receiver resumes only with the line after the delimiter');
+
 try { fs.unlinkSync(bin); } catch (_) {}
 console.log(`${pass} passed, ${fail} failed`);
 console.log(fail === 0 ? '\n✅ ALL MDIO COMMAND TESTS PASSED' : `\n❌ ${fail} FAILURE(S)`);

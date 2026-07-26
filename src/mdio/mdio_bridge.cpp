@@ -92,6 +92,12 @@ void UsbBridge::emitPrintBusy(uint8_t phy)
         printf("read %u/%u err busy\r\n", phy, reg);
 }
 
+void UsbBridge::emitInvalid()
+{
+    printf("err invalid\r\n");
+    blinkBad();
+}
+
 void UsbBridge::pollResponse()
 {
     if (pending_ && resp_.status != Master::Pending) {
@@ -126,7 +132,10 @@ void UsbBridge::pollResponse()
 void UsbBridge::handleLine(const char* line, uint16_t len)
 {
     Command c = parse(line, len);
-    if (!c.valid) { blinkBad(); return; }
+    if (!c.valid) {
+        emitInvalid();
+        return;
+    }
 
     switch (c.op) {
     case Op::Read:
@@ -190,15 +199,16 @@ void UsbBridge::pollCommand()
 {
     uint8_t b = 0;
     while (usb_.available() && usb_.read(&b, 1) == 1) {
-        if (b == '\n' || b == '\r') {
-            if (lineLen_) {
-                handleLine(line_, lineLen_);
-                lineLen_ = 0;
-            }
-        } else if (lineLen_ < sizeof(line_)) {
-            line_[lineLen_++] = (char)b;
-        } else {
-            lineLen_ = 0; // over-long line -> drop, resync on next newline
+        switch (pushCommandByte(b)) {
+        case LineEvent::Ready:
+            handleLine(line_, lineLen_);
+            lineLen_ = 0;
+            break;
+        case LineEvent::Invalid:
+            emitInvalid();
+            break;
+        case LineEvent::None:
+            break;
         }
     }
 }

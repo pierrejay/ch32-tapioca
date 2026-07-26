@@ -9,7 +9,8 @@
 //     !print <phy>                  bulk-read regs 0..31
 //
 // Parsing is deliberately a private UsbBridge detail. Malformed lines never reach
-// Mdio::Master, so CDC line noise cannot drive the bus.
+// Mdio::Master, so CDC line noise cannot drive the bus. An over-long line is rejected
+// as a whole: bytes are ignored until CR/LF, then the bridge emits `err invalid`.
 #pragma once
 
 #include <stddef.h>
@@ -31,6 +32,7 @@ public:
 
 private:
     enum class Op : uint8_t { None, Read, Write, Print };
+    enum class LineEvent : uint8_t { None, Ready, Invalid };
 
     struct Command {
         bool     valid = false;
@@ -140,6 +142,29 @@ private:
         return r;
     }
 
+    LineEvent pushCommandByte(uint8_t b)
+    {
+        if (b == '\n' || b == '\r') {
+            if (discardLine_) {
+                discardLine_ = false;
+                lineLen_ = 0;
+                return LineEvent::Invalid;
+            }
+            return lineLen_ ? LineEvent::Ready : LineEvent::None;
+        }
+
+        if (discardLine_) return LineEvent::None;
+
+        if (lineLen_ < sizeof(line_)) {
+            line_[lineLen_++] = (char)b;
+            return LineEvent::None;
+        }
+
+        lineLen_ = 0;
+        discardLine_ = true;
+        return LineEvent::None;
+    }
+
     bool startRead(const Command& c);
     bool startWrite(const Command& c);
     void handleLine(const char* line, uint16_t len);
@@ -147,6 +172,7 @@ private:
     void pollResponse();
     void emitActiveResponse();
     void emitPrintBusy(uint8_t phy);
+    void emitInvalid();
     void blinkOk();
     void blinkBad();
 
@@ -157,6 +183,7 @@ private:
     LedBlinker*      led_;
     char             line_[48] = {};
     uint16_t         lineLen_ = 0;
+    bool             discardLine_ = false;
     Master::Response resp_;
     bool             pending_ = false;
     Op               activeOp_ = Op::Read;

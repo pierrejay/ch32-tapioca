@@ -2,6 +2,7 @@
  *
  *   ./mdio_cmd_harness parse "<line>"   -> "0 -"                  (invalid)
  *                                       -> "1 <op> <phy[:mmd]> <reg|-> <val|->" (valid)
+ *   ./mdio_cmd_harness frame "<bytes>"  -> one "ready:<line>" or "invalid" event per line
  *
  * phy/mmd/reg are decimal; val (write only) is decimal; '-' marks a field the op doesn't carry.
  */
@@ -10,6 +11,8 @@
 #define private public
 #include "../../src/mdio/mdio_bridge.hpp"
 #undef private
+
+class UsbCdc {};
 
 int main(int argc, char **argv) {
     if (argc >= 3 && strcmp(argv[1], "parse") == 0) {
@@ -26,6 +29,22 @@ int main(int argc, char **argv) {
         printf("1 %s %s %s %s\n", op, path, reg, val);
         return 0;
     }
-    fprintf(stderr, "usage: %s parse <line>\n", argv[0]);
+    if (argc >= 3 && strcmp(argv[1], "frame") == 0) {
+        UsbCdc usb;
+        Mdio::Master mdio;
+        Mdio::UsbBridge bridge(usb, mdio);
+        const char *p = argv[2];
+        while (*p) {
+            Mdio::UsbBridge::LineEvent event = bridge.pushCommandByte((uint8_t)*p++);
+            if (event == Mdio::UsbBridge::LineEvent::Ready) {
+                printf("ready:%.*s\n", (int)bridge.lineLen_, bridge.line_);
+                bridge.lineLen_ = 0;
+            } else if (event == Mdio::UsbBridge::LineEvent::Invalid) {
+                printf("invalid\n");
+            }
+        }
+        return 0;
+    }
+    fprintf(stderr, "usage: %s <parse|frame> <input>\n", argv[0]);
     return 2;
 }
