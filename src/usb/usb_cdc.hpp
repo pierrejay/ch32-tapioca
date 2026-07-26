@@ -97,6 +97,15 @@ public:
         return c;
     }
 
+    // A CDC session starts when the host raises DTR, or when the USB bus resets.
+    // Consume-on-read so line-oriented users can discard partial state exactly once.
+    bool sessionStarted()
+    {
+        bool started = sessionStarted_;
+        sessionStarted_ = false;
+        return started;
+    }
+
 private:
     // --- USB control-transfer plumbing ---
     void  endpointInit();
@@ -135,6 +144,8 @@ private:
     uint8_t    lcWire_[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 }; // 115200 8N1
     LineCoding lc_;
     volatile bool lcChanged_ = false;
+    bool          dtr_ = false;
+    volatile bool sessionStarted_ = false;
 
     // Bulk endpoint flow control
     volatile bool ep3Busy_ = false;   // a bulk-IN transfer is in flight

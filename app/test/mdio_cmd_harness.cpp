@@ -3,6 +3,7 @@
  *   ./mdio_cmd_harness parse "<line>"   -> "0 -"                  (invalid)
  *                                       -> "1 <op> <phy[:mmd]> <reg|-> <val|->" (valid)
  *   ./mdio_cmd_harness frame "<bytes>"  -> one "ready:<line>" or "invalid" event per line
+ *                                         (0x1E simulates a new CDC/DTR session)
  *
  * phy/mmd/reg are decimal; val (write only) is decimal; '-' marks a field the op doesn't carry.
  */
@@ -35,7 +36,12 @@ int main(int argc, char **argv) {
         Mdio::UsbBridge bridge(usb, mdio);
         const char *p = argv[2];
         while (*p) {
-            Mdio::UsbBridge::LineEvent event = bridge.pushCommandByte((uint8_t)*p++);
+            uint8_t b = (uint8_t)*p++;
+            if (b == 0x1E) {
+                bridge.resetCommandLine();
+                continue;
+            }
+            Mdio::UsbBridge::LineEvent event = bridge.pushCommandByte(b);
             if (event == Mdio::UsbBridge::LineEvent::Ready) {
                 printf("ready:%.*s\n", (int)bridge.lineLen_, bridge.line_);
                 bridge.lineLen_ = 0;

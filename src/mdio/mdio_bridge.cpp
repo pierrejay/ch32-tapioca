@@ -215,6 +215,7 @@ void UsbBridge::pollCommand()
 
 void UsbBridge::tick()
 {
+    if (usb_.sessionStarted()) resetCommandLine();
     pollResponse();
     pollCommand();
 }

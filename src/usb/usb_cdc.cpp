@@ -264,7 +264,16 @@ void UsbCdc::handleSetup()
                     len = 7;
                     break;
                 case CDC_SET_LINE_CODING:    // data arrives in the OUT stage
-                case CDC_SET_LINE_CTLSTE:    // DTR/RTS - ignored
+                    break;
+                case CDC_SET_LINE_CTLSTE: {  // wValue bit 0 = DTR, bit 1 = RTS
+                    bool nextDtr = (setupValue_ & 0x0001u) != 0;
+                    if (nextDtr && !dtr_) {
+                        rx_.clear();          // discard bytes owned by the previous host session
+                        sessionStarted_ = true;
+                    }
+                    dtr_ = nextDtr;
+                    break;
+                }
                 case CDC_SEND_BREAK:         // ignored
                     break;
                 default:
@@ -524,6 +533,8 @@ void UsbCdc::busReset()
     devAddr_     = 0;
     sleepStatus_ = 0;
     enumerated_  = false;
+    dtr_         = false;
+    sessionStarted_ = true;
 
     rx_.clear();
     tx_.clear();

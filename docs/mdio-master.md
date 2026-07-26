@@ -98,7 +98,8 @@ RX  (device -> host)            request-echoed -> self-correlating
 - **Invalid input never reaches the bus**: malformed commands return `err invalid`.
   If a line exceeds the 48-byte receive buffer, the bridge rejects the entire line
   and ignores every remaining byte through the next CR/LF; a valid-looking suffix
-  can therefore never become a second command.
+  can therefore never become a second command. A USB bus reset or rising CDC DTR
+  starts a new session and clears any unterminated line left by the previous client.
 - **MMD access is currently indirect over Clause 22**: the master serializes the
   REGCR (`0x0D`) / ADDAR (`0x0E`) sequence internally, so no USB or firmware
   client can interleave a command in the middle and corrupt the MMD address latch.

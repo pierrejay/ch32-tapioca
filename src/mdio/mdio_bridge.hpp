@@ -165,6 +165,12 @@ private:
         return LineEvent::None;
     }
 
+    void resetCommandLine()
+    {
+        lineLen_ = 0;
+        discardLine_ = false;
+    }
+
     bool startRead(const Command& c);
     bool startWrite(const Command& c);
     void handleLine(const char* line, uint16_t len);

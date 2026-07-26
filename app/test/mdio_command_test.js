@@ -68,6 +68,10 @@ ok(run('frame', longPrefix + 'x\r\n') === 'invalid',
 ok(run('frame', longPrefix + '!write 0/0 1\n!read 1/2\n') ===
    'invalid\nready:!read 1/2',
    'receiver resumes only with the line after the delimiter');
+ok(run('frame', '!read 1/\x1e!read 1/2\n') === 'ready:!read 1/2',
+   'new DTR session clears an unterminated line');
+ok(run('frame', longPrefix + 'x\x1e!read 1/2\n') === 'ready:!read 1/2',
+   'new DTR session clears overflow discard state');
 
 try { fs.unlinkSync(bin); } catch (_) {}
 console.log(`${pass} passed, ${fail} failed`);

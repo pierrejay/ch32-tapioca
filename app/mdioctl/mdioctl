@@ -24,10 +24,12 @@ the CDC port ignores the baud rate. See README.md - the wire grammar is plain
 ASCII, so any terminal can drive the bus by hand; mdioctl is just the wrapper.
 """
 import argparse
+import fcntl
 import glob
 import os
 import re
 import select
+import struct
 import sys
 import termios
 import time
@@ -52,6 +54,12 @@ def open_port(path):
     a[6][termios.VMIN] = 0
     a[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSANOW, a)
+    try:
+        dtr = struct.pack("I", termios.TIOCM_DTR)
+        fcntl.ioctl(fd, termios.TIOCMBIC, dtr)
+        fcntl.ioctl(fd, termios.TIOCMBIS, dtr)
+    except (AttributeError, OSError):
+        pass                                           # best effort on non-POSIX CDC stacks
     return fd
 
 

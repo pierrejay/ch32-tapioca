@@ -88,7 +88,9 @@ protocol over CDC, so **any terminal works** — handy for debugging:
 e.g. `screen /dev/cu.usbmodemXXXX`, then type `!read 1/2`. The `#`-prefixed banner
 line at boot is informational; `mdioctl` skips it. Over-long input is rejected as
 one complete line through the next CR/LF, so its suffix is never interpreted.
-`mdioctl` reports the resulting `err invalid` directly and exits non-zero.
+`mdioctl` reports the resulting `err invalid` directly and exits non-zero. On open,
+it cycles CDC DTR so the firmware discards any unterminated line from a previous
+terminal session.
 
 ## Clause 45 / MMD
 
