@@ -59,6 +59,8 @@ out of that?*
 Reference dev board used for testing: [WeAct Studio CH32X035 Core Board](https://github.com/WeActStudio/WeActStudio.CH32X035CoreBoard)
 (< €2). The project builds with PlatformIO using the `ch32v` platform / `noneos-sdk` framework.
 
+Related project: [ch32-tapioca-probe](https://github.com/pierrejay/ch32-tapioca-probe), using the same approach to build an embedded debug/flashing probe (JTAG, ARM & CH32).
+
 ## Sniffer
 
 ### Working principle
@@ -208,16 +210,3 @@ Details: [docs/mdio-master.md](docs/mdio-master.md).
 | `app/test/` | the shared Node/C++ host test suite + codec sources of truth |
 | `scripts/` | offline Python decoders (CLI/CI) + throughput probe + `diag_monitor` |
 | `docs/` | detailed notes and screenshots used by the README |
-
-## Status & next
-
-**Done:** lossless capture of both clocked and clockless buses, validated end-to-end on real
-MDIO, CAN and DMX traffic; a runtime mode switch; a single binary wire protocol; a
-browser dashboard that decodes it live; offline Python decoders for captured files; and
-a separate Clause-22 MDIO master firmware with MMD indirect access and a
-`phytool`-style CLI.
-
-**Next:**
-
-- Add native Clause-45 MDIO frames behind the existing `phy:mmd/reg` syntax
-- More protocols (DMX driver, LIN sniffer, RS485 autodiscovery, DALI...)
